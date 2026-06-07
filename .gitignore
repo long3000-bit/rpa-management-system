@@ -1,0 +1,46 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Runtime and local state
+runtime/
+logs/
+data/
+*.db
+*.sqlite
+*.sqlite3
+
+# Large imports, exports, and local working files
+*.sql
+*.7z
+*.zip
+*.xlsx
+*.xls
+*.csv
+*.docx
+*.txt
+!requirements.txt
+*.tmp
+temp_*.py
+
+# Build outputs
+build/
+dist/
+*.spec~
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
