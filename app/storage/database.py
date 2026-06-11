@@ -642,6 +642,284 @@ class Database:
             ON operation_logs(created_at)
         ''')
         
+        # ========== 医保价格管控相关表 ==========
+        
+        # 导入批次记录表
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS medical_import_batches (
+                batch_id TEXT PRIMARY KEY,
+                batch_type TEXT NOT NULL,
+                file_name TEXT NOT NULL,
+                file_path TEXT,
+                sheet_name TEXT,
+                total_rows INTEGER DEFAULT 0,
+                success_rows INTEGER DEFAULT 0,
+                failed_rows INTEGER DEFAULT 0,
+                import_status TEXT DEFAULT 'pending',
+                imported_by TEXT,
+                imported_at TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+        ''')
+        
+        # 导入失败明细表
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS medical_import_failures (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                batch_id TEXT NOT NULL,
+                row_index INTEGER,
+                raw_data TEXT,
+                failure_reason TEXT,
+                created_at TEXT NOT NULL
+            )
+        ''')
+        
+        # 医保目录-西药原始导入表
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS medical_catalog_western (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                batch_id TEXT NOT NULL,
+                sheet_type TEXT NOT NULL,
+                row_index INTEGER,
+                国家药品代码 TEXT,
+                甲乙类 TEXT,
+                药品名称 TEXT,
+                英文名称 TEXT,
+                剂型 TEXT,
+                规格 TEXT,
+                包装规格 TEXT,
+                计价单位 TEXT,
+                计价规格 TEXT,
+                最小包装单位 TEXT,
+                最小包装数量 TEXT,
+                转换比 TEXT,
+                企业名称 TEXT,
+                质量层次 TEXT,
+                备注 TEXT,
+                限制使用范围 TEXT,
+                医保基础价格 TEXT,
+                医保支付标准 TEXT,
+                原始数据 TEXT,
+                created_at TEXT NOT NULL
+            )
+        ''')
+        
+        # 医保目录-中成药原始导入表
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS medical_catalog_chinese (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                batch_id TEXT NOT NULL,
+                sheet_type TEXT NOT NULL,
+                row_index INTEGER,
+                国家药品代码 TEXT,
+                甲乙类 TEXT,
+                药品名称 TEXT,
+                英文名称 TEXT,
+                剂型 TEXT,
+                规格 TEXT,
+                包装规格 TEXT,
+                计价单位 TEXT,
+                计价规格 TEXT,
+                最小包装单位 TEXT,
+                最小包装数量 TEXT,
+                转换比 TEXT,
+                企业名称 TEXT,
+                质量层次 TEXT,
+                备注 TEXT,
+                限制使用范围 TEXT,
+                医保基础价格 TEXT,
+                医保支付标准 TEXT,
+                原始数据 TEXT,
+                created_at TEXT NOT NULL
+            )
+        ''')
+        
+        # 医保价格上限原始导入表
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS medical_price_limit (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                batch_id TEXT NOT NULL,
+                row_index INTEGER,
+                医保编码 TEXT,
+                药品名称 TEXT,
+                剂型 TEXT,
+                规格 TEXT,
+                包装规格 TEXT,
+                计价单位 TEXT,
+                企业名称 TEXT,
+                医保价格上限 TEXT,
+                价格生效日期 TEXT,
+                备注 TEXT,
+                原始数据 TEXT,
+                created_at TEXT NOT NULL
+            )
+        ''')
+        
+        # 云药店商品目录原始导入表
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS cloud_pharmacy_catalog (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                batch_id TEXT NOT NULL,
+                row_index INTEGER,
+                商品编码 TEXT,
+                旧商品编码 TEXT,
+                商品名称 TEXT,
+                通用名 TEXT,
+                规格 TEXT,
+                剂型 TEXT,
+                包装规格 TEXT,
+                单位 TEXT,
+                生产厂家 TEXT,
+                批准文号 TEXT,
+                医保编码 TEXT,
+                医保类型 TEXT,
+                商品状态 TEXT,
+                创建时间 TEXT,
+                更新时间 TEXT,
+                原始数据 TEXT,
+                created_at TEXT NOT NULL
+            )
+        ''')
+        
+        # 君元销售价格抓取表
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS junyuan_sales_price (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                batch_id TEXT NOT NULL,
+                商品编码 TEXT,
+                商品名称 TEXT,
+                规格 TEXT,
+                剂型 TEXT,
+                包装规格 TEXT,
+                生产厂家 TEXT,
+                销售价 TEXT,
+                包装价 TEXT,
+                单片价 TEXT,
+                拆零价 TEXT,
+                价格类型 TEXT,
+                价格更新时间 TEXT,
+                抓取状态 TEXT DEFAULT 'success',
+                原始数据 TEXT,
+                created_at TEXT NOT NULL
+            )
+        ''')
+        
+        # 表间关联结果表
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS medical_price_link_result (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                compare_batch_id TEXT NOT NULL,
+                医保编码 TEXT,
+                国家药品代码 TEXT,
+                旧商品编码 TEXT,
+                商品编码 TEXT,
+                医保目录来源 TEXT,
+                医保价格上限来源 TEXT,
+                云药店目录来源 TEXT,
+                君元价格来源 TEXT,
+                匹配状态 TEXT,
+                医保编码缺失 INTEGER DEFAULT 0,
+                旧商品编码缺失 INTEGER DEFAULT 0,
+                医保编码重复 INTEGER DEFAULT 0,
+                旧商品编码重复 INTEGER DEFAULT 0,
+                关联失败原因 TEXT,
+                created_at TEXT NOT NULL
+            )
+        ''')
+        
+        # 价格比对结果表
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS medical_price_compare_result (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                compare_batch_id TEXT NOT NULL,
+                医保编码 TEXT,
+                国家药品代码 TEXT,
+                商品编码 TEXT,
+                旧商品编码 TEXT,
+                商品名称 TEXT,
+                规格 TEXT,
+                生产厂家 TEXT,
+                医保基础价格 TEXT,
+                医保价格上限 TEXT,
+                君元销售价 TEXT,
+                君元包装价 TEXT,
+                君元单片价 TEXT,
+                异常等级 TEXT,
+                超基础金额 TEXT,
+                超上限金额 TEXT,
+                处理状态 TEXT DEFAULT '未处理',
+                处理备注 TEXT,
+                处理人 TEXT,
+                处理时间 TEXT,
+                关联详情 TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+        ''')
+        
+        # 比对批次记录表
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS medical_compare_batches (
+                batch_id TEXT PRIMARY KEY,
+                医保目录批次 TEXT,
+                医保价格上限批次 TEXT,
+                云药店目录批次 TEXT,
+                君元价格批次 TEXT,
+                正常数量 INTEGER DEFAULT 0,
+                异常数量 INTEGER DEFAULT 0,
+                严重异常数量 INTEGER DEFAULT 0,
+                待补价格数量 INTEGER DEFAULT 0,
+                待补编码数量 INTEGER DEFAULT 0,
+                待确认数量 INTEGER DEFAULT 0,
+                总数量 INTEGER DEFAULT 0,
+                比对状态 TEXT DEFAULT 'pending',
+                比对人 TEXT,
+                比对时间 TEXT,
+                created_at TEXT NOT NULL
+            )
+        ''')
+        
+        # 创建索引
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_medical_import_batch_type
+            ON medical_import_batches(batch_type)
+        ''')
+        
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_medical_catalog_western_batch
+            ON medical_catalog_western(batch_id)
+        ''')
+        
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_medical_catalog_chinese_batch
+            ON medical_catalog_chinese(batch_id)
+        ''')
+        
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_medical_price_limit_batch
+            ON medical_price_limit(batch_id)
+        ''')
+        
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_cloud_pharmacy_catalog_batch
+            ON cloud_pharmacy_catalog(batch_id)
+        ''')
+        
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_junyuan_sales_price_batch
+            ON junyuan_sales_price(batch_id)
+        ''')
+        
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_medical_price_compare_batch
+            ON medical_price_compare_result(compare_batch_id)
+        ''')
+        
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_medical_price_compare_status
+            ON medical_price_compare_result(异常等级)
+        ''')
+        
         conn.commit()
         
         self._migrate_add_raw_data_columns()
@@ -1051,6 +1329,14 @@ class Database:
             ('operation.operation_logs.view', '查看操作日志', 'operation', 'menu.operation_logs', '查看操作日志', 181),
             ('operation.log.delete', '删除操作日志', 'operation', 'menu.operation_logs', '删除操作日志', 182),
             ('operation.log.export', '导出操作日志', 'operation', 'menu.operation_logs', '导出操作日志', 183),
+            ('menu.medical_price_control', '医保价格管控', 'menu', None, '医保价格管控菜单', 190),
+            ('operation.medical_price.import_catalog', '导入医保目录', 'operation', 'menu.medical_price_control', '导入医保目录Excel文件', 191),
+            ('operation.medical_price.import_price_limit', '导入价格上限', 'operation', 'menu.medical_price_control', '导入医保价格上限Excel文件', 192),
+            ('operation.medical_price.import_cloud_catalog', '导入商品目录', 'operation', 'menu.medical_price_control', '导入云药店商品目录Excel文件', 193),
+            ('operation.medical_price.fetch_junyuan_price', '抓取君元价格', 'operation', 'menu.medical_price_control', '从君元数据库抓取销售价格', 194),
+            ('operation.medical_price.run_compare', '执行价格比对', 'operation', 'menu.medical_price_control', '执行医保价格比对', 195),
+            ('operation.medical_price.handle_result', '处理比对结果', 'operation', 'menu.medical_price_control', '处理价格比对异常结果', 196),
+            ('operation.medical_price.export_result', '导出比对结果', 'operation', 'menu.medical_price_control', '导出价格比对结果', 197),
         ]
         
         for permission_code, permission_name, permission_type, parent_code, description, sort_order in permissions_data:
@@ -1072,7 +1358,7 @@ class Database:
         store_manager_permissions = [
             'menu.home', 'menu.rpa_robot', 'menu.smart_purchase', 'menu.yys_stock',
             'menu.jy_stock', 'menu.stock_compare', 'menu.ysb_reconcile',
-            'menu.reconciliation', 'menu.task_record',
+            'menu.reconciliation', 'menu.task_record', 'menu.medical_price_control',
             'operation.rpa.execute',
             'operation.smart_purchase.import_excel',
             'operation.smart_purchase.run_one_by_one',
@@ -1088,6 +1374,13 @@ class Database:
             'operation.yys_stock.compare_stock',
             'operation.yys_stock.test_api_sync',
             'operation.yys_stock.sync_diff',
+            'operation.medical_price.import_catalog',
+            'operation.medical_price.import_price_limit',
+            'operation.medical_price.import_cloud_catalog',
+            'operation.medical_price.fetch_junyuan_price',
+            'operation.medical_price.run_compare',
+            'operation.medical_price.handle_result',
+            'operation.medical_price.export_result',
             'operation.config.save_supplier_scope',
         ]
         

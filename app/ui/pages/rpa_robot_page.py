@@ -14,12 +14,14 @@ from datetime import datetime
 from typing import Dict, List, Tuple
 
 from app.storage.database import Database
+from app.core.permission_service import PermissionService
 from app.core.rpa_import_service import RpaImportService
 from app.core.rpa_template_service import RpaTemplateService
 from app.core.rpa_exe_config_service import RpaExeConfigService
 from app.core.rpa_executor import RpaExecutor
 from app.core.rpa_auto_login import RpaAutoLogin
 from app.core.data_permission_service import DataPermissionService
+from app.core.permission_checker import PermissionChecker, PermissionCodes
 
 
 class RpaRobotPage(QWidget):
@@ -29,6 +31,8 @@ class RpaRobotPage(QWidget):
         self.db = db
         self.username = username or 'admin'
         self.role_code = role_code or 'store_manager'
+        self.permission_service = PermissionService(db)
+        self.permission_checker = PermissionChecker(db, self.username)
         self.import_service = RpaImportService(db)
         self.template_service = RpaTemplateService(db)
         self.exe_config_service = RpaExeConfigService(db)
@@ -600,6 +604,9 @@ class RpaRobotPage(QWidget):
             self.progress_bar.setValue(progress)
     
     def _connect_exe(self):
+        if not self.permission_checker.check_permission(PermissionCodes.OP_RPA_EXECUTE, self):
+            return
+
         config_id = self.exe_config_combo.currentData()
         if not config_id:
             QMessageBox.warning(self, "提示", "请先选择目标EXE配置")
@@ -614,6 +621,9 @@ class RpaRobotPage(QWidget):
             self._log(f"EXE连接失败: {message}")
     
     def _test_login(self):
+        if not self.permission_checker.check_permission(PermissionCodes.OP_RPA_EXECUTE, self):
+            return
+
         config_id = self.exe_config_combo.currentData()
         if not config_id:
             QMessageBox.warning(self, "提示", "请先选择目标EXE配置")
@@ -628,6 +638,9 @@ class RpaRobotPage(QWidget):
             self._log(f"EXE启动失败: {message}")
     
     def _test_current_record(self):
+        if not self.permission_checker.check_permission(PermissionCodes.OP_RPA_EXECUTE, self):
+            return
+
         current_row = self.data_table.currentRow()
         if current_row < 0:
             QMessageBox.warning(self, "提示", "请先选择要测试的记录")
@@ -689,6 +702,9 @@ class RpaRobotPage(QWidget):
             self._log(f"测试失败: {result.get('error_message', '')}")
     
     def _start_execution(self):
+        if not self.permission_checker.check_permission(PermissionCodes.OP_RPA_EXECUTE, self):
+            return
+
         if self.is_executing:
             QMessageBox.warning(self, "提示", "任务正在执行中")
             return
@@ -819,10 +835,16 @@ class RpaRobotPage(QWidget):
         self._log("任务已停止")
     
     def _retry_failed(self):
+        if not self.permission_checker.check_permission(PermissionCodes.OP_RPA_EXECUTE, self):
+            return
+
         self.exec_mode_combo.setCurrentIndex(2)
         self._start_execution()
     
     def _export_result(self):
+        if not self.permission_checker.check_permission(PermissionCodes.OP_RPA_EXECUTE, self):
+            return
+
         if not self.import_batch_id:
             QMessageBox.warning(self, "提示", "请先选择导入批次")
             return

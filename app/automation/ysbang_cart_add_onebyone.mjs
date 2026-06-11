@@ -4,7 +4,7 @@ const [, , inputPath, outputPath] = process.argv;
 const CDP_URL = process.env.YSBANG_CDP_URL || "http://127.0.0.1:9222";
 const ADD_DELAY_MIN_MS = Number(process.env.YSBANG_ADD_DELAY_MIN_MS || 10000);
 const ADD_DELAY_MAX_MS = Number(process.env.YSBANG_ADD_DELAY_MAX_MS || 15000);
-const CDP_CALL_TIMEOUT_MS = Number(process.env.YSBANG_CDP_CALL_TIMEOUT_MS || 120000);
+const CDP_CALL_TIMEOUT_MS = Number(process.env.YSBANG_CDP_CALL_TIMEOUT_MS || 30000);
 
 if (!inputPath || !outputPath) {
   throw new Error("Usage: node ysbang_cart_add_onebyone.mjs <input.json> <output.json>");
@@ -115,6 +115,10 @@ class CdpClient {
 function normalizeAmount(value) {
   const amount = Number(String(value ?? "").replace(/,/g, "").trim());
   return Number.isFinite(amount) && amount > 0 ? amount : 0;
+}
+
+function normalizeWholesaleId(value) {
+  return String(value ?? "").trim().replace(/^YSB/i, "");
 }
 
 function normalizeText(value) {
@@ -251,6 +255,62 @@ function specPackageTokens(value) {
   return tokens;
 }
 
+const PACKAGE_COUNT_UNITS = "片|粒|丸|袋|支|瓶|盒|板|贴|包|枚|只|管|条|s|板装|片装|粒装|袋装|支装|瓶装|盒装";
+
+function specStrength(value) {
+  const text = String(value || "").toLowerCase().replace(/×/g, "*").replace(/x/g, "*").replace(/\s+/g, "");
+  const match = text.match(/(\d+(?:\.\d+)?)(mg|g|ml|ug|μg|iu|%)/i);
+  return match ? specUnitValue(`${match[1]}${match[2]}`) : "";
+}
+
+function specCountFactors(value) {
+  const text = String(value || "")
+    .toLowerCase()
+    .replace(/×/g, "*")
+    .replace(/x/g, "*")
+    .replace(/\d+(?:\.\d+)?\s*(?:盒|瓶|袋|支|板|片|粒|丸|贴|包|枚|只|s)\s*(?:起购|包邮)/g, "")
+    .replace(/\s+/g, "");
+  const factors = [];
+  const pattern = new RegExp(`(\\d+(?:\\.\\d+)?)\\s*(${PACKAGE_COUNT_UNITS})`, "gi");
+  let match;
+  while ((match = pattern.exec(text))) {
+    const number = Number(match[1]);
+    if (Number.isFinite(number) && number > 0) factors.push(number);
+  }
+  return factors;
+}
+
+function dedupeRepeatedFactors(factors) {
+  let values = factors.slice();
+  while (values.length > 1 && values.length % 2 === 0) {
+    const half = values.length / 2;
+    const left = values.slice(0, half);
+    const right = values.slice(half);
+    if (!left.every((value, index) => value === right[index])) break;
+    values = left;
+  }
+  return values;
+}
+
+function specPackageTotal(value) {
+  const factors = dedupeRepeatedFactors(specCountFactors(value));
+  return factors.length ? factors.reduce((total, factor) => total * factor, 1) : 0;
+}
+
+function specEquivalent(source, target) {
+  if (!source || !target) return false;
+  const sourceStrength = specStrength(source);
+  const targetStrength = specStrength(target);
+  const sourceTotal = specPackageTotal(source);
+  const targetTotal = specPackageTotal(target);
+  return Boolean(
+    sourceTotal
+    && targetTotal
+    && sourceTotal === targetTotal
+    && (!sourceStrength || !targetStrength || sourceStrength === targetStrength)
+  );
+}
+
 function decimalPlain(value) {
   const number = Number(value);
   if (!Number.isFinite(number)) return String(value || "");
@@ -305,6 +365,7 @@ function specPartsWithKnownCountUnits(value) {
 }
 
 function packageTotalConflict(source, target) {
+  if (specEquivalent(source, target)) return false;
   const sourceParts = specPartsWithKnownCountUnits(source);
   const targetParts = specPartsWithKnownCountUnits(target);
   return Boolean(
@@ -321,6 +382,7 @@ function hasCountUnit(value) {
 
 function specScore(source, target) {
   if (!source) return 60;
+  if (specEquivalent(source, target)) return 100;
   const sourceParts = specParts(source);
   const targetParts = specParts(target);
   const sourceUnits = specUnitSet(source);
@@ -354,6 +416,7 @@ function specScore(source, target) {
 
 function specCompatible(source, target) {
   if (!source) return true;
+  if (specEquivalent(source, target)) return true;
   if (packageTotalConflict(source, target)) return false;
   if (specScore(source, target) >= 70) return true;
   const wanted = specPackageTokens(source);
@@ -716,13 +779,13 @@ async function scanCart(client) {
 }
 
 function findCartItem(cartPayload, wholesaleId) {
-  const target = String(wholesaleId);
+  const target = normalizeWholesaleId(wholesaleId);
   const stack = [cartPayload];
   while (stack.length) {
     const current = stack.pop();
     if (!current || typeof current !== "object") continue;
     const candidateId = current.wholesaleId ?? current.wholesaleid ?? current.wholeSaleId ?? current.goodsId ?? current.drugId ?? current.id;
-    if (candidateId != null && String(candidateId) === target) return current;
+    if (candidateId != null && normalizeWholesaleId(candidateId) === target) return current;
     for (const value of Object.values(current)) {
       if (Array.isArray(value)) stack.push(...value);
       else if (value && typeof value === "object") stack.push(value);
@@ -780,7 +843,7 @@ function readCartAmount(cartItem) {
 }
 
 async function addToCart(client, item) {
-  const wholesaleId = String(item.wholesaleId || "").trim();
+  const wholesaleId = normalizeWholesaleId(item.wholesaleId);
   const amount = normalizeAmount(item.amount);
   return client.evaluate(`(async () => {
     const token = (document.cookie.match(/(?:^|; )Token=([^;]+)/) || [])[1] || "";
@@ -812,7 +875,7 @@ async function addToCart(client, item) {
 }
 
 async function searchCandidate(client, item) {
-  const keyword = String(item.name || "").trim();
+  const keyword = String(item.smartName || item.name || "").trim();
   if (!keyword) return { candidate: null, score: 0, count: 0, reason: "缺少商品名称，无法搜索匹配" };
   const searchKey = baseName(keyword) || keyword;
   let payload = {};
@@ -1029,7 +1092,6 @@ try {
         continue;
       }
 
-    const originalWholesaleId = String(item.wholesaleId || "").trim();
     const match = await searchCandidate(client, item);
     await trace(
       `SEARCH_MATCH row=${item.rowNumber} count=${match.count} score=${match.score} `
@@ -1049,14 +1111,8 @@ try {
       item.matchDetail = match.detail || {};
       item.matchSource = "name_spec_manufacturer";
       item.matchReason = `名称/规格/厂家模糊匹配通过，分数 ${match.score}（名称${match.detail?.nameScore ?? ''}，规格${match.detail?.specScore ?? ''}，厂家${match.detail?.makerScore ?? ''}）`;
-    } else if (originalWholesaleId && !match.noFallback && !String(item.spec || "").trim()) {
-      item.wholesaleId = originalWholesaleId;
-      item.matchScore = match.score || "";
-      item.matchSource = "fallback_ysb_code";
-      item.matchReason = `名称/规格/厂家模糊匹配未通过，退回使用原药师帮编码 ${originalWholesaleId}；原因：${match.reason || `分数 ${match.score}`}`;
-      await trace(`FALLBACK_YSB_CODE row=${item.rowNumber} wholesale_id=${originalWholesaleId} reason=${item.matchReason}`);
     } else {
-      results.push(resultFor(item, "failed", match.reason || "未匹配到可采购商品，且没有可兜底的药师帮编码", {
+      results.push(resultFor(item, "failed", match.reason || "未匹配到可采购商品", {
         matchScore: match.score,
         candidateCount: match.count,
         matchSource: "name_spec_manufacturer",

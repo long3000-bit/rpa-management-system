@@ -27,6 +27,7 @@ from app.ui.pages.jy_stock_query_page import JyStockQueryPage
 from app.ui.pages.yys_api_config_page import YysApiConfigPage
 from app.ui.pages.user_manage_page import UserManagePage
 from app.ui.pages.role_permission_page import RolePermissionPage
+from app.ui.pages.medical_price_control_page import MedicalPriceControlPage
 from app.ui.change_password_dialog import ChangePasswordDialog
 
 
@@ -114,6 +115,7 @@ class MainWindow(QWidget):
                 ],
             },
             ("配置中心", "settings", "menu.config_center"),
+            ("医保价格管控", "medical_price", "menu.medical_price_control"),
             ("用户管理", "user_manage", "menu.user_manage"),
             ("角色权限管理", "role_permission", "menu.role_permission"),
             ("日志与截图", "log", "menu.operation_logs"),
@@ -215,6 +217,7 @@ class MainWindow(QWidget):
             "db_import": "药师帮对账 / 数据库导入",
             "task_record": "药师帮对账 / 执行记录",
             "settings": "配置中心",
+            "medical_price": "医保价格管控",
             "user_manage": "用户管理",
             "role_permission": "角色权限管理",
             "log": "日志与截图",
@@ -235,6 +238,7 @@ class MainWindow(QWidget):
             "db_import": "数据库导入",
             "task_record": "执行记录",
             "settings": "配置中心",
+            "medical_price": "医保价格",
             "user_manage": "用户管理",
             "role_permission": "角色权限",
             "log": "日志",
@@ -255,6 +259,7 @@ class MainWindow(QWidget):
             "db_import": DbImportPage(self.db, self.user['username']),
             "task_record": TaskRecordPage(self.db, self.user['username'], self.user.get('role_code', 'store_manager')),
             "settings": SettingsPage(self.db, self.user['username']),
+            "medical_price": MedicalPriceControlPage(self.db, self.user['username'], self.user.get('role_code', 'store_manager')),
             "user_manage": UserManagePage(self.db, self.user['username']),
             "role_permission": RolePermissionPage(self.db, self.user['username']),
             "log": OperationLogPage(self.db, self.user['username']),
@@ -329,6 +334,7 @@ class MainWindow(QWidget):
             "db_import": "menu.db_import",
             "task_record": "menu.task_record",
             "settings": "menu.config_center",
+            "medical_price": "menu.medical_price_control",
             "user_manage": "menu.user_manage",
             "role_permission": "menu.role_permission",
             "log": "menu.operation_logs",

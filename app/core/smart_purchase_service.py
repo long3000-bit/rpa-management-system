@@ -592,7 +592,8 @@ class SmartPurchaseService:
         max_rows: int = 0,
         use_cart_adapter: bool = True,
         progress_callback: Callable[[str], None] = None,
-        web_error_callback: Callable[[str], bool] = None
+        web_error_callback: Callable[[str], bool] = None,
+        pause_callback: Callable[[], None] = None
     ) -> Tuple[Dict, List[str], str]:
         try:
             batch = self.get_batch(batch_id)
@@ -634,7 +635,14 @@ class SmartPurchaseService:
             ready_items = []
             ready_results = {}
             
-            for item in items:
+            for item_index, item in enumerate(items, start=1):
+                if pause_callback and pause_callback():
+                    skipped_count = len(items) - item_index + 1
+                    summary["skipped"] += skipped_count
+                    message = f"用户请求停止，剩余 {skipped_count} 条未执行"
+                    self._append_purchase_trace(trace_path, f"STOP_REQUESTED stage=precheck remaining={skipped_count}", progress_callback)
+                    logs.append(message)
+                    return summary, logs, ""
                 result = self._prepare_cart_purchase_item(item, supplier_scope)
                 self._append_purchase_trace(
                     trace_path,
@@ -659,16 +667,121 @@ class SmartPurchaseService:
                 )
             
             if ready_items:
+                self._append_purchase_trace(
+                    trace_path,
+                    f"CART_ADAPTER_START ready_count={len(ready_items)} mode=one_by_one_writeback",
+                    progress_callback
+                )
+                original_ready_items = list(ready_items)
+                for index, adapter_item in enumerate(original_ready_items, start=1):
+                    if pause_callback and pause_callback():
+                        skipped_count = len(original_ready_items) - index + 1
+                        summary["skipped"] += skipped_count
+                        message = f"用户请求停止，剩余 {skipped_count} 条未执行"
+                        self._append_purchase_trace(trace_path, f"STOP_REQUESTED stage=cart remaining={skipped_count}", progress_callback)
+                        logs.append(message)
+                        return summary, logs, ""
+                    self._append_purchase_trace(
+                        trace_path,
+                        f"CART_ADAPTER_ITEM_START index={index}/{len(original_ready_items)} "
+                        f"row={adapter_item.get('rowNumber', '')} item_id={adapter_item.get('itemId', '')}",
+                        progress_callback
+                    )
+                    if use_cart_adapter:
+                        adapter_results = self._run_cart_adapter_batch(
+                            batch_id,
+                            [adapter_item],
+                            trace_path,
+                            progress_callback,
+                            stop_callback=pause_callback,
+                        )
+                        adapter_results = self._handle_web_error_retry(
+                            batch_id,
+                            [adapter_item],
+                            adapter_results,
+                            trace_path,
+                            progress_callback,
+                            web_error_callback,
+                            stop_callback=pause_callback,
+                        )
+                    else:
+                        adapter_results = self._adapter_failure_results([adapter_item], "未启用药师帮购物车真实加购，未执行加购")
+                        self._append_purchase_trace(trace_path, "CART_ADAPTER_SKIPPED disabled", progress_callback)
+                    if not adapter_results:
+                        adapter_results = self._adapter_failure_results([adapter_item], "购物车执行器未返回本行结果")
+
+                    for adapter_result in adapter_results:
+                        item_id = adapter_result.get("itemId", "")
+                        base_result = ready_results.get(item_id)
+                        if not base_result:
+                            self._append_purchase_trace(
+                                trace_path,
+                                f"CART_RESULT_IGNORED item_id={item_id} result={json.dumps(adapter_result, ensure_ascii=False)}",
+                                progress_callback
+                            )
+                            continue
+                        result = self._merge_cart_adapter_result(base_result, adapter_result)
+                        if use_cart_adapter and result.get("purchase_status") in ("success", "skipped"):
+                            cart_items = self._run_cart_snapshot(batch_id, trace_path, progress_callback)
+                            self._append_purchase_trace(
+                                trace_path,
+                                f"CART_BACKFILL_SNAPSHOT count={len(cart_items)} row={adapter_result.get('rowNumber', '')}",
+                                progress_callback
+                            )
+                            backfilled = self._apply_cart_backfill_to_result(result, adapter_item, cart_items, adapter_result)
+                            self._append_purchase_trace(
+                                trace_path,
+                                f"CART_BACKFILL row={adapter_result.get('rowNumber', '')} "
+                                f"item_id={item_id} matched={backfilled.get('matched', False)} "
+                                f"score={backfilled.get('score', '')} "
+                                f"wholesale_id={backfilled.get('wholesaleId', '')} "
+                                f"supplier={backfilled.get('supplier', '')} "
+                                f"reason={backfilled.get('reason', '')}",
+                                progress_callback
+                            )
+                        self._save_purchase_result(item_id, result)
+                        status = result.get("purchase_status", "failed")
+                        summary[status if status in summary else "failed"] += 1
+                        self._append_purchase_trace(
+                            trace_path,
+                            f"WRITE_RESULT row={adapter_result.get('rowNumber', '')} item_id={item_id} "
+                            f"wholesale_id={adapter_result.get('wholesaleId', '')} status={status} "
+                            f"actual_ysb_code={result.get('actual_ysb_code', '')} "
+                            f"verified_amount={adapter_result.get('verifiedAmount', '')} "
+                            f"match_source={adapter_result.get('matchSource', '')} "
+                            f"match_score={adapter_result.get('matchScore', '')} "
+                            f"match_reason={adapter_result.get('matchReason', '')} "
+                            f"reason={result.get('purchase_reason', '')}",
+                            progress_callback
+                        )
+                        logs.append(
+                            f"第{adapter_result.get('rowNumber', '')}行 {adapter_result.get('name', '')}: "
+                            f"{self._status_text(status)} - {result.get('purchase_reason', '')}"
+                        )
+                        if progress_callback:
+                            progress_callback(
+                                f"进度 {index}/{len(original_ready_items)} 行{adapter_result.get('rowNumber', '')}: "
+                                f"{self._status_text(status)} - {result.get('purchase_reason', '')}"
+                            )
+                ready_items = []
+                use_cart_adapter = False
                 if use_cart_adapter:
                     self._append_purchase_trace(trace_path, f"CART_ADAPTER_START ready_count={len(ready_items)}", progress_callback)
-                    adapter_results = self._run_cart_adapter_batch(batch_id, ready_items, trace_path, progress_callback)
+                    adapter_results = self._run_cart_adapter_batch(
+                        batch_id,
+                        ready_items,
+                        trace_path,
+                        progress_callback,
+                        stop_callback=pause_callback,
+                    )
                     adapter_results = self._handle_web_error_retry(
                         batch_id,
                         ready_items,
                         adapter_results,
                         trace_path,
                         progress_callback,
-                        web_error_callback
+                        web_error_callback,
+                        stop_callback=pause_callback,
                     )
                 else:
                     adapter_results = self._adapter_failure_results(ready_items, "未启用药师帮购物车真实加购，未执行加购")
@@ -912,11 +1025,15 @@ class SmartPurchaseService:
             "amount": str(quantity).strip(),
             "name": source_name or smart_name or "",
             "spec": source_spec or smart_spec or "",
+            "smartName": smart_name,
+            "smartSpec": smart_spec,
             "manufacturer": item.get("source_maker") or "",
             "approval": item.get("source_approval") or "",
             "supplier": item.get("smart_supplier") or "",
             "supplierFull": item.get("smart_supplier_full") or "",
             "price": item.get("smart_price") or "",
+            "minAmount": item.get("min_purchase_quantity") or "",
+            "stock": item.get("available_stock") or "",
             "expectedPrice": item.get("expected_price") or "",
             "maxAllowedPrice": base_result.get("max_allowed_price", ""),
             "supplierScope": supplier_scope or [],
@@ -945,7 +1062,8 @@ class SmartPurchaseService:
         batch_id: str,
         adapter_items: List[Dict],
         trace_path: str = "",
-        progress_callback: Callable[[str], None] = None
+        progress_callback: Callable[[str], None] = None,
+        stop_callback: Callable[[], bool] = None
     ) -> List[Dict]:
         node_bin = os.environ.get("NODE_EXE") or shutil.which("node")
         if not node_bin:
@@ -990,6 +1108,26 @@ class SmartPurchaseService:
             deadline = time.monotonic() + max(180, len(adapter_items) * 75)
             while process.poll() is None:
                 trace_position = self._emit_new_trace_lines(trace_path, trace_position, progress_callback)
+                if stop_callback and stop_callback():
+                    process.kill()
+                    completed_stdout, completed_stderr = process.communicate(timeout=5)
+                    trace_position = self._emit_new_trace_lines(trace_path, trace_position, progress_callback)
+                    self._append_purchase_trace(
+                        trace_path,
+                        f"CART_ADAPTER_STOPPED stdout={completed_stdout.strip()} stderr={completed_stderr.strip()}",
+                        progress_callback
+                    )
+                    for path in (input_path, output_path):
+                        try:
+                            if path.exists():
+                                path.unlink()
+                        except Exception as cleanup_error:
+                            self._append_purchase_trace(
+                                trace_path,
+                                f"CART_ADAPTER_STOP_CLEANUP_ERROR path={path} error={cleanup_error}",
+                                progress_callback
+                            )
+                    return self._adapter_failure_results(adapter_items, "用户请求停止，已结束当前 Node 加购进程")
                 if time.monotonic() > deadline:
                     process.kill()
                     completed_stdout, completed_stderr = process.communicate(timeout=5)
@@ -1197,7 +1335,8 @@ class SmartPurchaseService:
         return [match.group(1).rstrip("0").rstrip(".") for match in re.finditer(r"(?<![a-z0-9])(\d+(?:\.\d+)?)(?!\d)", text, re.I)]
 
     def _cart_spec_unit_value(self, value) -> str:
-        text = re.sub(r"\s+", "", self._cart_text(value).lower()).replace("ug", "μg")
+        text = re.sub(r"\s+", "", self._cart_text(value).lower())
+        text = text.replace("ug", "μg").replace("µg", "μg").replace("渭g", "μg")
         match = re.fullmatch(r"(\d+(?:\.\d+)?)(mg|g|ml|μg|iu|%)", text)
         if not match:
             return text
@@ -1217,27 +1356,32 @@ class SmartPurchaseService:
         return text.rstrip("0").rstrip(".") if "." in text else text
 
     def _cart_spec_unit_set(self, value) -> set:
-        text = self._cart_text(value).lower().replace("×", "*").replace("x", "*")
+        text = self._cart_text(value).lower().replace("×", "*").replace("脳", "*").replace("x", "*")
         return {
             self._cart_spec_unit_value(match.group(0))
-            for match in re.finditer(r"\d+(?:\.\d+)?\s*(?:mg|g|ml|ug|μg|iu|%)", text, re.I)
+            for match in re.finditer(r"\d+(?:\.\d+)?\s*(?:mg|g|ml|ug|μg|µg|渭g|iu|%)", text, re.I)
         }
 
     def _cart_has_count_unit(self, value) -> bool:
         text = self._cart_text(value).lower()
-        return bool(re.search(r"\d+\s*(片|粒|袋|板|支|瓶|贴|枚|丸|包|s)", text, re.I))
+        return bool(re.search(r"\d+(?:\.\d+)?\s*(片|粒|丸|袋|支|瓶|盒|板|贴|包|枚|只|管|条|s)", text, re.I))
 
     def _cart_spec_parts(self, value) -> Tuple[str, int]:
-        text = self._cart_text(value).lower().replace("脳", "*").replace("x", "*")
+        text = self._cart_text(value).lower().replace("×", "*").replace("脳", "*").replace("x", "*")
         strength = ""
-        strength_match = re.search(r"(\d+(?:\.\d+)?\s*(?:mg|g|ml|ug|渭g|iu|%))", text, re.I)
+        strength_match = re.search(r"(\d+(?:\.\d+)?\s*(?:mg|g|ml|ug|μg|µg|渭g|iu|%))", text, re.I)
         if strength_match:
             strength = self._cart_spec_unit_value(strength_match.group(1))
-        count_unit_pattern = r"(?:鐗噟绮抾琚媩鏉縷鏀瘄鐡秥璐磡鏋殀涓竱鍖厊s|片|粒|丸|袋|支|瓶|盒|板|贴|包|管|Ƭ)"
+        count_unit_pattern = r"(?:片|粒|丸|袋|支|瓶|盒|板|贴|包|枚|只|管|条|s)"
         numbers = [
             int(float(match.group(1)))
             for match in re.finditer(rf"(?<![a-z0-9])(\d+(?:\.\d+)?)(?!\d)\s*{count_unit_pattern}", text, re.I)
         ]
+        while len(numbers) > 1 and len(numbers) % 2 == 0:
+            half = len(numbers) // 2
+            if numbers[:half] != numbers[half:]:
+                break
+            numbers = numbers[:half]
         total = 0
         if numbers:
             total = 1
@@ -1330,10 +1474,15 @@ class SmartPurchaseService:
         excluded_cart_keys = excluded_cart_keys or set()
         wanted_id = self._cart_code(result.get("actual_ysb_code") or adapter_item.get("wholesaleId"))
         if wanted_id:
+            target_spec = adapter_item.get("spec") or adapter_item.get("matchedSpec") or ""
             same_id = [
                 item for item in cart_items
                 if self._cart_code(item.get("wholesaleId")) == wanted_id
                 and self._cart_item_key(item) not in excluded_cart_keys
+                and not self._cart_package_total_conflict(
+                    target_spec,
+                    f"{item.get('spec') or ''}{item.get('name') or item.get('drugName') or ''}"
+                )
             ]
             if same_id:
                 chosen = sorted(same_id, key=lambda item: self._to_decimal(item.get("price")) or Decimal("999999"))[0]
@@ -1655,7 +1804,8 @@ class SmartPurchaseService:
         adapter_results: List[Dict],
         trace_path: str,
         progress_callback: Callable[[str], None] = None,
-        web_error_callback: Callable[[str], bool] = None
+        web_error_callback: Callable[[str], bool] = None,
+        stop_callback: Callable[[], bool] = None
     ) -> List[Dict]:
         combined = list(adapter_results or [])
         while True:
@@ -1684,13 +1834,22 @@ class SmartPurchaseService:
             if not retry_items:
                 self._append_purchase_trace(trace_path, "WEB_ERROR_RETRY no_remaining_items", progress_callback)
                 return combined
+            if stop_callback and stop_callback():
+                self._append_purchase_trace(trace_path, "WEB_ERROR_RETRY skipped_by_stop", progress_callback)
+                return combined
             combined = [
                 result
                 for result in combined
                 if result.get("status") != "web_error" and result.get("itemId") not in {item.get("itemId") for item in retry_items}
             ]
             self._append_purchase_trace(trace_path, f"WEB_ERROR_RETRY remaining_count={len(retry_items)}", progress_callback)
-            retry_results = self._run_cart_adapter_batch(batch_id, retry_items, trace_path, progress_callback)
+            retry_results = self._run_cart_adapter_batch(
+                batch_id,
+                retry_items,
+                trace_path,
+                progress_callback,
+                stop_callback=stop_callback,
+            )
             combined.extend(retry_results)
 
     def _get_batch_purchase_status_counts(self, batch_id: str) -> Dict[str, int]:

@@ -39,6 +39,10 @@ build/
 dist/
 *.spec~
 
+# Node
+node_modules/
+extensions/notion-trae-extension/out/
+
 # OS/editor noise
 .DS_Store
 Thumbs.db

@@ -33,6 +33,7 @@ class SmartPurchaseWorker(QObject):
         self.retry_failed = retry_failed
         self._web_decision_event = threading.Event()
         self._web_decision_continue = False
+        self._stop_event = threading.Event()
     
     @Slot()
     def run(self):
@@ -44,7 +45,8 @@ class SmartPurchaseWorker(QObject):
                 retry_failed=self.retry_failed,
                 use_cart_adapter=self.use_cart_adapter,
                 progress_callback=self.progress.emit,
-                web_error_callback=self._ask_web_continue
+                web_error_callback=self._ask_web_continue,
+                pause_callback=self._should_stop
             )
             self.finished.emit(summary or {}, logs or [], error or "")
         except Exception as e:
@@ -63,6 +65,16 @@ class SmartPurchaseWorker(QObject):
     def set_web_decision(self, should_continue: bool):
         self._web_decision_continue = should_continue
         self._web_decision_event.set()
+
+    def _should_stop(self) -> bool:
+        return self._stop_event.is_set()
+
+    @Slot()
+    def request_stop(self):
+        self._stop_event.set()
+        self._web_decision_continue = False
+        self._web_decision_event.set()
+        self.progress.emit("已请求停止，当前品种处理完成后结束本次采购")
 
 
 class CartBackfillWorker(QObject):
@@ -113,6 +125,7 @@ class SmartPurchasePage(QWidget):
         self.preview_rows = []
         self.purchase_thread = None
         self.purchase_worker = None
+        self.purchase_stop_requested = False
         self.cart_backfill_thread = None
         self.cart_backfill_worker = None
         self._init_ui()
@@ -225,6 +238,11 @@ class SmartPurchasePage(QWidget):
         self.start_purchase_btn.clicked.connect(self._start_purchase)
         self.start_purchase_btn.setStyleSheet("background-color: #4CAF50; color: white;")
         control_layout.addWidget(self.start_purchase_btn)
+
+        self.pause_purchase_btn = QPushButton("停止")
+        self.pause_purchase_btn.clicked.connect(self._stop_purchase)
+        self.pause_purchase_btn.setEnabled(False)
+        control_layout.addWidget(self.pause_purchase_btn)
         
         self.cart_adapter_check = QCheckBox("连接药师帮购物车真实加购")
         self.cart_adapter_check.setChecked(True)
@@ -548,6 +566,9 @@ class SmartPurchasePage(QWidget):
         self.start_purchase_btn.setEnabled(False)
         self.retry_btn.setEnabled(False)
         self.cart_backfill_btn.setEnabled(False)
+        self.pause_purchase_btn.setEnabled(True)
+        self.pause_purchase_btn.setText("停止")
+        self.purchase_stop_requested = False
         self._append_log(f"{action_title}...")
         
         self.purchase_thread = QThread(self)
@@ -606,9 +627,22 @@ class SmartPurchasePage(QWidget):
         self.start_purchase_btn.setEnabled(True)
         self.retry_btn.setEnabled(True)
         self.cart_backfill_btn.setEnabled(True)
+        self.pause_purchase_btn.setEnabled(False)
+        self.pause_purchase_btn.setText("停止")
+        self.purchase_stop_requested = False
         self._load_batch_items()
         self.purchase_thread = None
         self.purchase_worker = None
+
+    def _stop_purchase(self):
+        if not self.purchase_worker:
+            return
+        if self.purchase_stop_requested:
+            return
+        self.purchase_stop_requested = True
+        self.purchase_worker.request_stop()
+        self.pause_purchase_btn.setText("停止中...")
+        self.pause_purchase_btn.setEnabled(False)
 
     @Slot(dict, list, str)
     def _on_cart_backfill_finished(self, summary, logs, error):

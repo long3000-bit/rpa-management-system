@@ -1,0 +1,110 @@
+{
+  "name": "notion-trae-extension",
+  "displayName": "Notion Integration for Trae",
+  "description": "Notion API integration plugin for Trae IDE - fetch, update, and manage Notion pages",
+  "version": "1.0.0",
+  "publisher": "trae-user",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onCommand:notion.configureToken",
+    "onCommand:notion.fetchPage",
+    "onCommand:notion.updatePage",
+    "onCommand:notion.insertContent"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "notion.configureToken",
+        "title": "Notion: Configure Integration Token"
+      },
+      {
+        "command": "notion.fetchPage",
+        "title": "Notion: Fetch Page Content"
+      },
+      {
+        "command": "notion.updatePage",
+        "title": "Notion: Update Page Properties"
+      },
+      {
+        "command": "notion.insertContent",
+        "title": "Notion: Insert Content to Page"
+      },
+      {
+        "command": "notion.listPages",
+        "title": "Notion: List Available Pages"
+      },
+      {
+        "command": "notion.searchPages",
+        "title": "Notion: Search Pages"
+      },
+      {
+        "command": "notion.showStatus",
+        "title": "Notion: Show Authorization Status"
+      }
+    ],
+    "configuration": {
+      "title": "Notion Integration",
+      "properties": {
+        "notion.integrationToken": {
+          "type": "string",
+          "default": "",
+          "description": "Notion Integration Token (secret_xxx...)"
+        },
+        "notion.defaultPageId": {
+          "type": "string",
+          "default": "",
+          "description": "Default Notion page ID for operations"
+        },
+        "notion.proxy": {
+          "type": "string",
+          "default": "",
+          "description": "Proxy server address (e.g., http://127.0.0.1:7890). Leave empty to use system proxy."
+        },
+        "notion.autoRetry": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically retry failed API requests"
+        },
+        "notion.retryCount": {
+          "type": "number",
+          "default": 5,
+          "description": "Number of retry attempts for failed requests"
+        },
+        "notion.timeout": {
+          "type": "number",
+          "default": 60000,
+          "description": "API request timeout in milliseconds"
+        },
+        "notion.cacheEnabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable local cache for GET requests (5 minutes)"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "pretest": "npm run compile",
+    "lint": "eslint src --ext ts"
+  },
+  "devDependencies": {
+    "@types/node": "^18.0.0",
+    "@types/vscode": "^1.85.0",
+    "@typescript-eslint/eslint-plugin": "^6.0.0",
+    "@typescript-eslint/parser": "^6.0.0",
+    "eslint": "^8.0.0",
+    "typescript": "^5.0.0"
+  },
+  "dependencies": {
+    "axios": "^1.6.0"
+  }
+}

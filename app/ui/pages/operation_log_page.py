@@ -263,6 +263,9 @@ class OperationLogPage(QWidget):
     
     def view_detail(self):
         """查看日志详情"""
+        if not self.permission_checker.check_permission(PermissionCodes.OP_OPERATION_LOGS_VIEW, self):
+            return
+
         selected_rows = self.table.selectedItems()
         if not selected_rows:
             QMessageBox.warning(self, "提示", "请先选择一条日志")
