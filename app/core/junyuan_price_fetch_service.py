@@ -46,6 +46,7 @@ class JunyuanPriceFetchService:
             包装价,
             单片价,
             拆零价,
+            库存数量,
             价格类型,
             价格更新时间
         FROM 商品价格表
@@ -89,11 +90,11 @@ class JunyuanPriceFetchService:
             
             # 连接数据库
             connection = pymysql.connect(
-                host=db_config['host'],
-                port=db_config['port'],
-                user=db_config['username'],
-                password=db_config['password'],
-                database=db_config['database_name'],
+                host=db_config.host,
+                port=db_config.port,
+                user=db_config.username,
+                password=db_config.password,
+                database=db_config.database_name,
                 charset='utf8mb4',
                 cursorclass=DictCursor,
                 connect_timeout=30
@@ -119,9 +120,9 @@ class JunyuanPriceFetchService:
                         local_cursor.execute('''
                             INSERT INTO junyuan_sales_price (
                                 batch_id, 商品编码, 商品名称, 规格, 剂型, 包装规格,
-                                生产厂家, 销售价, 包装价, 单片价, 拆零价, 价格类型,
+                                生产厂家, 销售价, 包装价, 单片价, 拆零价, 库存数量, 价格类型,
                                 价格更新时间, 抓取状态, 原始数据, created_at
-                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         ''', (
                             batch_id,
                             row_data.get("商品编码", ""),
@@ -134,6 +135,7 @@ class JunyuanPriceFetchService:
                             row_data.get("包装价", ""),
                             row_data.get("单片价", ""),
                             row_data.get("拆零价", ""),
+                            row_data.get("库存数量", ""),
                             row_data.get("价格类型", ""),
                             row_data.get("价格更新时间", ""),
                             "success",

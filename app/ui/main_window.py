@@ -28,6 +28,12 @@ from app.ui.pages.yys_api_config_page import YysApiConfigPage
 from app.ui.pages.user_manage_page import UserManagePage
 from app.ui.pages.role_permission_page import RolePermissionPage
 from app.ui.pages.medical_price_control_page import MedicalPriceControlPage
+from app.ui.pages.medical_western_query_page import MedicalWesternQueryPage
+from app.ui.pages.medical_chinese_query_page import MedicalChineseQueryPage
+from app.ui.pages.medical_price_limit_query_page import MedicalPriceLimitQueryPage
+from app.ui.pages.medical_cloud_catalog_query_page import MedicalCloudCatalogQueryPage
+from app.ui.pages.medical_compare_result_query_page import MedicalCompareResultQueryPage
+from app.ui.pages.tts_page import TTSPage
 from app.ui.change_password_dialog import ChangePasswordDialog
 
 
@@ -83,8 +89,15 @@ class MainWindow(QWidget):
         # 定义菜单项及其权限编码
         menu_items = [
             ("首页", "home", "menu.home"),
-            ("RPA机器人", "rpa", "menu.rpa_robot"),
-            ("EXE配置管理", "exe_config", "menu.exe_config"),
+            {
+                "text": "智能工具",
+                "group_id": "smart_tools_group",
+                "children": [
+                    ("RPA机器人", "rpa", "menu.rpa_robot"),
+                    ("EXE配置管理", "exe_config", "menu.exe_config"),
+                    ("文本转语音", "tts", "menu.tts"),
+                ],
+            },
             {
                 "text": "智能采购",
                 "group_id": "smart_purchase_group",
@@ -114,11 +127,28 @@ class MainWindow(QWidget):
                     ("执行记录", "task_record", "menu.task_record"),
                 ],
             },
-            ("配置中心", "settings", "menu.config_center"),
-            ("医保价格管控", "medical_price", "menu.medical_price_control"),
-            ("用户管理", "user_manage", "menu.user_manage"),
-            ("角色权限管理", "role_permission", "menu.role_permission"),
-            ("日志与截图", "log", "menu.operation_logs"),
+            {
+                "text": "医保价格管控",
+                "group_id": "medical_price_group",
+                "children": [
+                    ("价格比对", "medical_price_compare", "menu.medical_price_compare"),
+                    ("比对结果查询", "medical_compare_result_query", "menu.medical_compare_result_query"),
+                    ("医保西药查询", "medical_western_query", "menu.medical_western_query"),
+                    ("医保中成药查询", "medical_chinese_query", "menu.medical_chinese_query"),
+                    ("价格上限查询", "medical_price_limit_query", "menu.medical_price_limit_query"),
+                    ("商品信息查询", "medical_cloud_catalog_query", "menu.medical_cloud_catalog_query"),
+                ],
+            },
+            {
+                "text": "系统管理",
+                "group_id": "system_management",
+                "children": [
+                    ("配置中心", "settings", "menu.config_center"),
+                    ("用户管理", "user_manage", "menu.user_manage"),
+                    ("角色权限管理", "role_permission", "menu.role_permission"),
+                    ("日志与截图", "log", "menu.operation_logs"),
+                ],
+            },
         ]
         
         # 根据权限过滤菜单项
@@ -149,6 +179,7 @@ class MainWindow(QWidget):
                     btn.setProperty("page_id", page_id)
                     btn.setProperty("group_id", group_id)
                     btn.clicked.connect(lambda checked, pid=page_id: self._switch_page(pid))
+                    btn.setVisible(False)  # 默认不显示子菜单
                     layout.addWidget(btn)
                     self.menu_buttons.append(btn)
                     child_buttons.append(btn)
@@ -156,7 +187,7 @@ class MainWindow(QWidget):
                 self.menu_groups[group_id] = {
                     "button": group_btn,
                     "children": child_buttons,
-                    "expanded": True,
+                    "expanded": False,  # 默认不展开
                     "text": item["text"],
                 }
                 continue
@@ -216,11 +247,17 @@ class MainWindow(QWidget):
             "inbound_query": "药师帮对账 / 入库单查询",
             "db_import": "药师帮对账 / 数据库导入",
             "task_record": "药师帮对账 / 执行记录",
-            "settings": "配置中心",
-            "medical_price": "医保价格管控",
-            "user_manage": "用户管理",
-            "role_permission": "角色权限管理",
-            "log": "日志与截图",
+            "medical_price_compare": "医保价格管控 / 价格比对",
+            "medical_compare_result_query": "医保价格管控 / 比对结果查询",
+            "medical_western_query": "医保价格管控 / 医保西药查询",
+            "medical_chinese_query": "医保价格管控 / 医保中成药查询",
+            "medical_price_limit_query": "医保价格管控 / 价格上限查询",
+            "medical_cloud_catalog_query": "医保价格管控 / 商品信息查询",
+            "settings": "系统管理 / 配置中心",
+            "tts": "系统管理 / 文本转语音",
+            "user_manage": "系统管理 / 用户管理",
+            "role_permission": "系统管理 / 角色权限管理",
+            "log": "系统管理 / 日志与截图",
         }
         self.page_tab_titles = {
             "home": "首页",
@@ -238,31 +275,47 @@ class MainWindow(QWidget):
             "db_import": "数据库导入",
             "task_record": "执行记录",
             "settings": "配置中心",
-            "medical_price": "医保价格",
+            "medical_price_compare": "价格比对",
+            "medical_compare_result_query": "比对结果",
+            "medical_western_query": "医保西药",
+            "medical_chinese_query": "医保中成药",
+            "medical_price_limit_query": "价格上限",
+            "medical_cloud_catalog_query": "商品信息",
+            "tts": "文本转语音",
             "user_manage": "用户管理",
             "role_permission": "角色权限",
             "log": "日志",
         }
+        # 页面字典 - 延迟加载，只创建首页
         self.pages = {
             "home": HomePage(),
-            "rpa": RpaRobotPage(self.db, self.user['username'], self.user.get('role_code', 'store_manager')),
-            "exe_config": RpaExeConfigPage(self.db),
-            "smart_purchase": SmartPurchasePage(self.db, self.user['username'], self.user.get('role_code', 'store_manager')),
-            "stock_compare": StockComparePage(self.db, self.user['username'], self.user.get('role_code', 'store_manager')),
-            "yys_stock_query": YysStockQueryPage(self.db, self.user['username'], self.user.get('role_code', 'store_manager')),
-            "jy_stock_query": JyStockQueryPage(self.db),
-            "yys_api_config": YysApiConfigPage(self.db, self.user['username']),
-            "reconciliation": ReconciliationPage(self.db, self.user['username'], self.user.get('role_code', 'store_manager')),
-            "recon_result": ReconciliationResultPage(self.db),
-            "ysb_query": YsbDataQueryPage(self.db),
-            "inbound_query": InboundQueryPage(self.db),
-            "db_import": DbImportPage(self.db, self.user['username']),
-            "task_record": TaskRecordPage(self.db, self.user['username'], self.user.get('role_code', 'store_manager')),
-            "settings": SettingsPage(self.db, self.user['username']),
-            "medical_price": MedicalPriceControlPage(self.db, self.user['username'], self.user.get('role_code', 'store_manager')),
-            "user_manage": UserManagePage(self.db, self.user['username']),
-            "role_permission": RolePermissionPage(self.db, self.user['username']),
-            "log": OperationLogPage(self.db, self.user['username']),
+        }
+        # 其他页面在首次访问时创建
+        self._page_classes = {
+            "rpa": lambda: RpaRobotPage(self.db, self.user['username'], self.user.get('role_code', 'store_manager')),
+            "exe_config": lambda: RpaExeConfigPage(self.db),
+            "smart_purchase": lambda: SmartPurchasePage(self.db, self.user['username'], self.user.get('role_code', 'store_manager')),
+            "stock_compare": lambda: StockComparePage(self.db, self.user['username'], self.user.get('role_code', 'store_manager')),
+            "yys_stock_query": lambda: YysStockQueryPage(self.db, self.user['username'], self.user.get('role_code', 'store_manager')),
+            "jy_stock_query": lambda: JyStockQueryPage(self.db),
+            "yys_api_config": lambda: YysApiConfigPage(self.db, self.user['username']),
+            "reconciliation": lambda: ReconciliationPage(self.db, self.user['username'], self.user.get('role_code', 'store_manager')),
+            "recon_result": lambda: ReconciliationResultPage(self.db),
+            "ysb_query": lambda: YsbDataQueryPage(self.db),
+            "inbound_query": lambda: InboundQueryPage(self.db),
+            "db_import": lambda: DbImportPage(self.db, self.user['username']),
+            "task_record": lambda: TaskRecordPage(self.db, self.user['username'], self.user.get('role_code', 'store_manager')),
+            "settings": lambda: SettingsPage(self.db, self.user['username']),
+            "medical_price_compare": lambda: MedicalPriceControlPage(self.db, self.user['username'], self.user.get('role_code', 'store_manager')),
+            "medical_compare_result_query": lambda: MedicalCompareResultQueryPage(self.db, self.user),
+            "medical_western_query": lambda: MedicalWesternQueryPage(self.db, self.user),
+            "medical_chinese_query": lambda: MedicalChineseQueryPage(self.db, self.user),
+            "medical_price_limit_query": lambda: MedicalPriceLimitQueryPage(self.db, self.user),
+            "medical_cloud_catalog_query": lambda: MedicalCloudCatalogQueryPage(self.db, self.user),
+            "tts": lambda: TTSPage(self.db, self.user),
+            "user_manage": lambda: UserManagePage(self.db, self.user['username']),
+            "role_permission": lambda: RolePermissionPage(self.db, self.user['username']),
+            "log": lambda: OperationLogPage(self.db, self.user['username']),
         }
         
         self.page_tabs = QTabWidget()
@@ -348,7 +401,12 @@ class MainWindow(QWidget):
         
         page = self.pages.get(page_id)
         if not page:
-            return
+            # 延迟创建页面 - 首次访问时才创建
+            if page_id in self._page_classes:
+                page = self._page_classes[page_id]()
+                self.pages[page_id] = page
+            else:
+                return
         
         if page_id not in self.opened_tabs:
             tab_index = self.page_tabs.addTab(page, self.page_tab_titles.get(page_id, self.page_titles.get(page_id, "")))

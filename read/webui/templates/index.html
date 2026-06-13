@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <title>edge-tts Web UI</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", "Microsoft YaHei", sans-serif;
+      margin: 0;
+      padding: 24px;
+      background: #f5f7fb;
+      color: #222;
+    }
+    .wrap {
+      max-width: 900px;
+      margin: 0 auto;
+      background: #fff;
+      border-radius: 12px;
+      box-shadow: 0 2px 10px rgba(0,0,0,0.06);
+      padding: 24px;
+    }
+    h1 { margin-top: 0; font-size: 22px; }
+    .row { margin-bottom: 16px; }
+    label { display: block; font-weight: 600; margin-bottom: 6px; font-size: 14px; }
+    textarea, select, input[type=number], input[type=text] {
+      width: 100%;
+      padding: 10px 12px;
+      border: 1px solid #d0d7e2;
+      border-radius: 8px;
+      font-size: 14px;
+      font-family: inherit;
+    }
+    textarea { min-height: 140px; resize: vertical; }
+    .grid3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+    .grid2 { display: grid; grid-template-columns: 2fr 1fr; gap: 12px; }
+    button {
+      padding: 10px 18px;
+      background: #2d6cdf;
+      color: #fff;
+      border: none;
+      border-radius: 8px;
+      font-size: 15px;
+      cursor: pointer;
+    }
+    button:disabled { background: #9ab; cursor: not-allowed; }
+    .hint { color: #667; font-size: 12px; margin-top: 4px; }
+    .result {
+      margin-top: 20px;
+      padding: 16px;
+      background: #f0f4fb;
+      border-radius: 8px;
+      display: none;
+    }
+    .result.visible { display: block; }
+    audio { width: 100%; margin: 8px 0; }
+    .dl-links { display: flex; gap: 12px; flex-wrap: wrap; }
+    .dl-links a {
+      padding: 8px 12px;
+      background: #fff;
+      border: 1px solid #c5cfe0;
+      border-radius: 6px;
+      text-decoration: none;
+      color: #2d6cdf;
+      font-size: 14px;
+    }
+    .msg { color: #b33; font-size: 14px; white-space: pre-wrap; }
+    .note { color: #555; font-size: 13px; margin-top: 12px; }
+    input[type=file] { font-size: 13px; }
+    .slider-wrap { display: flex; align-items: center; gap: 10px; }
+    .slider-wrap input[type=range] { flex: 1; }
+    .bgm-box {
+      background: #f0f4fb;
+      border-radius: 8px;
+      padding: 14px 16px;
+      margin-bottom: 18px;
+    }
+    .bgm-box .row { margin-bottom: 10px; }
+    .bgm-box .row:last-child { margin-bottom: 0; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>edge-tts Web UI — 文字转语音</h1>
+
+    <div class="row">
+      <label for="text">文本</label>
+      <textarea id="text" placeholder="在此输入要朗读的文本...">你好，欢迎使用 edge-tts 文字转语音服务。你可以在这里输入任意中文文本，然后点击生成按钮。</textarea>
+    </div>
+
+    <div class="row">
+      <label for="voice">
+        声音
+        <span class="hint">（默认只显示中文；需要英文/日文等其他声音时点右侧"显示全部"）</span>
+      </label>
+      <div class="grid2">
+        <select id="voice"></select>
+        <button type="button" id="btn-toggle-lang" style="padding:8px 12px;">显示全部语言</button>
+      </div>
+      <div class="hint" id="voice-info"></div>
+    </div>
+
+    <div class="row grid3">
+      <div>
+        <label for="rate">语速 (百分比，例如 -20、0、+20)</label>
+        <input type="number" id="rate" value="0" step="5" />
+      </div>
+      <div>
+        <label for="volume">音量 (百分比)</label>
+        <input type="number" id="volume" value="0" step="5" />
+      </div>
+      <div>
+        <label for="pitch">音调 (Hz，例如 -20、0、+20)</label>
+        <input type="number" id="pitch" value="0" step="5" />
+      </div>
+    </div>
+
+    <div class="bgm-box">
+      <div style="font-weight:600; font-size:14px; margin-bottom:10px;">🎵 背景音乐（可选）</div>
+      <div class="row">
+        <label for="bgm">上传背景音乐文件（mp3 / wav / m4a / ogg）</label>
+        <input type="file" id="bgm" accept="audio/*" />
+        <div class="hint" id="bgm-info">不上传则只生成纯语音 TTS。</div>
+      </div>
+      <div class="row">
+        <label for="bgm-volume">背景音乐音量：<span id="bgm-vol-label">20</span>%</label>
+        <div class="slider-wrap">
+          <input type="range" id="bgm-volume" min="0" max="100" value="20" />
+        </div>
+      </div>
+    </div>
+
+    <div class="row">
+      <button id="btn-gen">生成</button>
+      <span class="hint" id="status"></span>
+    </div>
+
+    <div class="result" id="result">
+      <div><strong>试听</strong></div>
+      <audio id="player" controls preload="auto"></audio>
+      <div class="dl-links">
+        <a id="dl-mp3" href="#" download="tts.mp3">下载 MP3</a>
+        <a id="dl-srt" href="#" download="tts.srt">下载 SRT 字幕</a>
+      </div>
+    </div>
+
+    <div class="note">基于 edge-tts 的 Microsoft Edge 在线 TTS 服务。生成的文件会在服务器上保留约 30 分钟。</div>
+    <div class="msg" id="msg"></div>
+  </div>
+
+<script src="/static/app.js?v={{ version }}"></script>
+</body>
+</html>

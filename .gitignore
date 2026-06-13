@@ -43,6 +43,12 @@ dist/
 node_modules/
 extensions/notion-trae-extension/out/
 
+# Embedded git repos
+read/edge-tts/
+
+# Audio outputs
+read/webui/outputs/
+
 # OS/editor noise
 .DS_Store
 Thumbs.db

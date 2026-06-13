@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QListWidgetItem, QAbstractItemView
 )
 from PySide6.QtCore import Qt, QThread, Signal
+from PySide6.QtGui import QShowEvent
 import logging
 from datetime import datetime
 from pathlib import Path
@@ -27,6 +28,7 @@ from app.storage.database import Database
 from app.core.medical_price_import_service import MedicalPriceImportService
 from app.core.junyuan_price_fetch_service import JunyuanPriceFetchService
 from app.core.medical_price_compare_service import MedicalPriceCompareService
+from app.core.database_config_service import DatabaseConfigService
 from app.core.permission_checker import PermissionChecker, PermissionCodes
 
 
@@ -51,15 +53,17 @@ class FetchWorker(QThread):
     """价格抓取工作线程"""
     finished = Signal(object)
     
-    def __init__(self, fetch_service, db_config_id, username):
+    def __init__(self, fetch_service, db_config_id, custom_sql, username):
         super().__init__()
         self.fetch_service = fetch_service
         self.db_config_id = db_config_id
+        self.custom_sql = custom_sql
         self.username = username
     
     def run(self):
         result = self.fetch_service.fetch_junyuan_prices(
             db_config_id=self.db_config_id,
+            custom_sql=self.custom_sql,
             imported_by=self.username
         )
         self.finished.emit(result)
@@ -98,6 +102,7 @@ class MedicalPriceControlPage(QWidget):
         self.import_service = MedicalPriceImportService(db)
         self.fetch_service = JunyuanPriceFetchService(db)
         self.compare_service = MedicalPriceCompareService(db)
+        self.db_config_service = DatabaseConfigService(db)
         
         self.permission_checker = PermissionChecker(db, self.username)
         
@@ -106,8 +111,17 @@ class MedicalPriceControlPage(QWidget):
         self.fetch_worker = None
         self.compare_worker = None
         
+        self._batches_loaded = False  # 标记批次是否已加载
+        
         self._init_ui()
-        self._load_batches()
+        # 延迟加载批次数据 - 不在初始化时加载
+    
+    def showEvent(self, event: QShowEvent):
+        """页面显示事件 - 首次显示时加载批次数据"""
+        super().showEvent(event)
+        if not self._batches_loaded:
+            self._batches_loaded = True
+            self._load_batches()
     
     def _init_ui(self):
         layout = QVBoxLayout(self)
@@ -171,17 +185,17 @@ class MedicalPriceControlPage(QWidget):
         
         layout.addWidget(medical_group)
         
-        # 医保价格上限导入
-        price_group = QGroupBox("医保价格上限导入")
+        # 三同口径文件导入
+        price_group = QGroupBox("三同口径文件导入")
         price_layout = QHBoxLayout(price_group)
         
-        price_layout.addWidget(QLabel("价格上限文件:"))
+        price_layout.addWidget(QLabel("三同口径文件:"))
         self.price_limit_file_edit = QLineEdit()
         price_layout.addWidget(self.price_limit_file_edit)
         price_btn = QPushButton("选择文件")
         price_btn.clicked.connect(lambda: self._select_file(self.price_limit_file_edit))
         price_layout.addWidget(price_btn)
-        self.import_price_btn = QPushButton("导入价格上限")
+        self.import_price_btn = QPushButton("导入三同口径")
         self.import_price_btn.clicked.connect(self._import_price_limit)
         price_layout.addWidget(self.import_price_btn)
         
@@ -205,14 +219,55 @@ class MedicalPriceControlPage(QWidget):
         
         # 君元价格抓取
         jy_group = QGroupBox("君元销售价格抓取")
-        jy_layout = QHBoxLayout(jy_group)
+        jy_layout = QVBoxLayout(jy_group)
         
-        jy_layout.addWidget(QLabel("数据库配置:"))
+        # 数据库配置选择
+        db_config_row = QHBoxLayout()
+        db_config_row.addWidget(QLabel("数据库配置:"))
         self.jy_db_config_combo = QComboBox()
-        jy_layout.addWidget(self.jy_db_config_combo)
+        self.jy_db_config_combo.setMinimumWidth(300)
+        db_config_row.addWidget(self.jy_db_config_combo)
+        
+        refresh_config_btn = QPushButton("刷新配置")
+        refresh_config_btn.clicked.connect(self._load_db_configs)
+        db_config_row.addWidget(refresh_config_btn)
+        
+        db_config_row.addStretch()
+        jy_layout.addLayout(db_config_row)
+        
+        # 自定义SQL输入
+        sql_row = QHBoxLayout()
+        sql_row.addWidget(QLabel("自定义SQL:"))
+        
+        self.custom_sql_edit = QTextEdit()
+        self.custom_sql_edit.setMaximumHeight(100)
+        self.custom_sql_edit.setPlaceholderText("可选：输入自定义SQL查询语句，不输入则使用默认SQL")
+        sql_row.addWidget(self.custom_sql_edit)
+        
+        # SQL管理按钮
+        sql_btn_widget = QWidget()
+        sql_btn_layout = QVBoxLayout(sql_btn_widget)
+        sql_btn_layout.setContentsMargins(0, 0, 0, 0)
+        
+        save_sql_btn = QPushButton("保存SQL")
+        save_sql_btn.clicked.connect(self._save_custom_sql)
+        sql_btn_layout.addWidget(save_sql_btn)
+        
+        use_saved_btn = QPushButton("读取保存的SQL")
+        use_saved_btn.clicked.connect(self._load_saved_sql)
+        sql_btn_layout.addWidget(use_saved_btn)
+        
+        sql_row.addWidget(sql_btn_widget)
+        
+        jy_layout.addLayout(sql_row)
+        
+        # 抓取按钮
+        fetch_row = QHBoxLayout()
         self.fetch_price_btn = QPushButton("抓取价格")
         self.fetch_price_btn.clicked.connect(self._fetch_junyuan_prices)
-        jy_layout.addWidget(self.fetch_price_btn)
+        fetch_row.addWidget(self.fetch_price_btn)
+        fetch_row.addStretch()
+        jy_layout.addLayout(fetch_row)
         
         layout.addWidget(jy_group)
         
@@ -274,26 +329,13 @@ class MedicalPriceControlPage(QWidget):
         batch_group = QGroupBox("选择数据批次")
         batch_layout = QFormLayout(batch_group)
         
-        # 医保目录批次 - 多选
-        medical_widget = QWidget()
-        medical_layout = QVBoxLayout(medical_widget)
-        medical_layout.setContentsMargins(0, 0, 0, 0)
+        # 西药医保目录批次 - 下拉框单选
+        self.western_catalog_combo = QComboBox()
+        batch_layout.addRow("西药医保目录批次:", self.western_catalog_combo)
         
-        self.medical_catalog_list = QListWidget()
-        self.medical_catalog_list.setSelectionMode(QAbstractItemView.MultiSelection)
-        self.medical_catalog_list.setMaximumHeight(150)
-        medical_layout.addWidget(self.medical_catalog_list)
-        
-        medical_btn_row = QHBoxLayout()
-        select_all_btn = QPushButton("全选")
-        select_all_btn.clicked.connect(lambda: self._select_all_list_items(self.medical_catalog_list))
-        medical_btn_row.addWidget(select_all_btn)
-        clear_btn = QPushButton("清空")
-        clear_btn.clicked.connect(lambda: self.medical_catalog_list.clearSelection())
-        medical_btn_row.addWidget(clear_btn)
-        medical_layout.addLayout(medical_btn_row)
-        
-        batch_layout.addRow("医保目录批次:", medical_widget)
+        # 中成药医保目录批次 - 下拉框单选
+        self.chinese_catalog_combo = QComboBox()
+        batch_layout.addRow("中成药医保目录批次:", self.chinese_catalog_combo)
         
         self.price_limit_combo = QComboBox()
         batch_layout.addRow("价格上限批次:", self.price_limit_combo)
@@ -322,12 +364,13 @@ class MedicalPriceControlPage(QWidget):
         stats_group = QGroupBox("比对结果统计")
         stats_layout = QHBoxLayout(stats_group)
         
-        self.normal_label = QLabel("正常: 0")
-        self.abnormal_label = QLabel("异常: 0")
-        self.severe_label = QLabel("严重异常: 0")
-        self.missing_price_label = QLabel("待补价格: 0")
-        self.missing_code_label = QLabel("待补编码: 0")
-        self.pending_label = QLabel("待确认: 0")
+        self.normal_label = QLabel("正常: 0 (0%)")
+        self.abnormal_label = QLabel("异常: 0 (0%)")
+        self.severe_label = QLabel("严重异常: 0 (0%)")
+        self.missing_price_label = QLabel("待补价格: 0 (0%)")
+        self.missing_code_label = QLabel("待补编码: 0 (0%)")
+        self.pending_label = QLabel("待确认: 0 (0%)")
+        self.total_label = QLabel("总数: 0")
         
         stats_layout.addWidget(self.normal_label)
         stats_layout.addWidget(self.abnormal_label)
@@ -335,6 +378,7 @@ class MedicalPriceControlPage(QWidget):
         stats_layout.addWidget(self.missing_price_label)
         stats_layout.addWidget(self.missing_code_label)
         stats_layout.addWidget(self.pending_label)
+        stats_layout.addWidget(self.total_label)
         
         layout.addWidget(stats_group)
         
@@ -351,6 +395,21 @@ class MedicalPriceControlPage(QWidget):
         compare_batch_layout.addWidget(self.compare_batch_table)
         
         self.compare_batch_table.itemClicked.connect(self._select_compare_batch)
+        
+        # 比对批次操作按钮
+        compare_batch_btn_row = QHBoxLayout()
+        
+        refresh_compare_batch_btn = QPushButton("刷新批次")
+        refresh_compare_batch_btn.clicked.connect(self._load_batches)
+        compare_batch_btn_row.addWidget(refresh_compare_batch_btn)
+        
+        delete_compare_batch_btn = QPushButton("删除选中批次")
+        delete_compare_batch_btn.clicked.connect(self._delete_compare_batch)
+        compare_batch_btn_row.addWidget(delete_compare_batch_btn)
+        
+        compare_batch_btn_row.addStretch()
+        
+        compare_batch_layout.addLayout(compare_batch_btn_row)
         
         layout.addWidget(compare_batch_group)
         
@@ -509,22 +568,24 @@ class MedicalPriceControlPage(QWidget):
     
     def _fetch_junyuan_prices(self):
         """抓取君元价格"""
+        # 检查数据库配置
+        db_config_id = self.jy_db_config_combo.currentData()
+        
+        if not db_config_id:
+            QMessageBox.warning(self, "提示", "请先配置数据库连接，或选择有效的数据库配置")
+            return
+        
+        # 获取自定义SQL
+        custom_sql = self.custom_sql_edit.toPlainText().strip()
+        
         self.fetch_price_btn.setEnabled(False)
         self.import_progress.setVisible(True)
         self.import_progress.setValue(0)
         
-        db_config_id = None
-        config_text = self.jy_db_config_combo.currentText()
-        if config_text and config_text != "无配置":
-            # 解析配置ID
-            try:
-                db_config_id = int(config_text.split(":")[0])
-            except:
-                pass
-        
         self.fetch_worker = FetchWorker(
             self.fetch_service,
             db_config_id,
+            custom_sql if custom_sql else None,
             self.username
         )
         self.fetch_worker.finished.connect(self._on_fetch_finished)
@@ -621,17 +682,21 @@ class MedicalPriceControlPage(QWidget):
         # 加载比对批次下拉框
         available_batches = self.import_service.get_available_batches_for_compare()
         
-        # 医保目录批次 - 多选列表
-        self.medical_catalog_list.clear()
-        # 合并西药和中成药目录
-        medical_batches = []
-        medical_batches.extend(available_batches.get('medical_catalog_western', []))
-        medical_batches.extend(available_batches.get('medical_catalog_chinese', []))
+        # 西药医保目录批次 - 下拉框
+        self.western_catalog_combo.clear()
+        self.western_catalog_combo.addItem("自动选择最新")
+        western_batches = available_batches.get('medical_catalog_western', [])
         
-        for batch in medical_batches:
-            item = QListWidgetItem(f"{batch['batch_id']}: {batch['file_name']}")
-            item.setData(Qt.UserRole, batch['batch_id'])
-            self.medical_catalog_list.addItem(item)
+        for batch in western_batches:
+            self.western_catalog_combo.addItem(f"{batch['batch_id']}: {batch['file_name']}")
+        
+        # 中成药医保目录批次 - 下拉框
+        self.chinese_catalog_combo.clear()
+        self.chinese_catalog_combo.addItem("自动选择最新")
+        chinese_batches = available_batches.get('medical_catalog_chinese', [])
+        
+        for batch in chinese_batches:
+            self.chinese_catalog_combo.addItem(f"{batch['batch_id']}: {batch['file_name']}")
         
         self.price_limit_combo.clear()
         self.price_limit_combo.addItem("自动选择最新")
@@ -648,19 +713,147 @@ class MedicalPriceControlPage(QWidget):
         for batch in available_batches.get('junyuan_sales_price', []):
             self.jy_price_combo.addItem(f"{batch['batch_id']}: SQL抓取")
         
-        # 比对批次列表
-        compare_batches = self.compare_service.get_compare_batches(limit=10)
+        # 加载比对批次记录
+        compare_batches = self.compare_service.get_compare_batches(limit=20)
         self.compare_batch_table.setRowCount(len(compare_batches))
         
         for row, batch in enumerate(compare_batches):
             self.compare_batch_table.setItem(row, 0, QTableWidgetItem(batch.get('batch_id', '')))
-            self.compare_batch_table.setItem(row, 1, QTableWidgetItem(str(batch.get('正常数量', 0))))
-            self.compare_batch_table.setItem(row, 2, QTableWidgetItem(str(batch.get('异常数量', 0))))
-            self.compare_batch_table.setItem(row, 3, QTableWidgetItem(str(batch.get('严重异常数量', 0))))
-            self.compare_batch_table.setItem(row, 4, QTableWidgetItem(str(batch.get('待补价格数量', 0))))
-            self.compare_batch_table.setItem(row, 5, QTableWidgetItem(str(batch.get('待补编码数量', 0))))
+            self.compare_batch_table.setItem(row, 1, QTableWidgetItem(batch.get('比对时间', '')))
+            self.compare_batch_table.setItem(row, 2, QTableWidgetItem(str(batch.get('总数量', 0))))
+            self.compare_batch_table.setItem(row, 3, QTableWidgetItem(str(batch.get('正常数量', 0))))
+            self.compare_batch_table.setItem(row, 4, QTableWidgetItem(str(batch.get('异常数量', 0))))
+            self.compare_batch_table.setItem(row, 5, QTableWidgetItem(str(batch.get('严重异常数量', 0))))
             self.compare_batch_table.setItem(row, 6, QTableWidgetItem(str(batch.get('待确认数量', 0))))
-            self.compare_batch_table.setItem(row, 7, QTableWidgetItem(batch.get('比对时间', '')))
+            self.compare_batch_table.setItem(row, 7, QTableWidgetItem(batch.get('比对状态', '')))
+        
+        # 加载数据库配置
+        self._load_db_configs()
+    
+    def _load_db_configs(self):
+        """加载数据库配置列表"""
+        configs = self.db_config_service.get_all_configs()
+        
+        self.jy_db_config_combo.clear()
+        
+        if not configs:
+            self.jy_db_config_combo.addItem("未配置数据库连接")
+            return
+        
+        for config in configs:
+            # DbConfig 是对象，使用属性访问
+            display_text = f"{config.name} ({config.host}:{config.port}/{config.database_name})"
+            self.jy_db_config_combo.addItem(display_text, config.id)
+        
+        # 默认读取保存的SQL
+        self._load_saved_sql_silent()
+    
+    def _delete_compare_batch(self):
+        """删除选中的比对批次"""
+        selected_rows = self.compare_batch_table.selectedItems()
+        if not selected_rows:
+            QMessageBox.warning(self, "提示", "请先选择要删除的比对批次")
+            return
+        
+        # 获取选中行的批次ID
+        row = selected_rows[0].row()
+        batch_id = self.compare_batch_table.item(row, 0).text()
+        
+        # 确认删除
+        reply = QMessageBox.question(
+            self, "确认删除",
+            f"确定要删除比对批次吗？\n\n批次ID: {batch_id}\n\n删除后将同时删除该批次的所有比对结果数据！",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        
+        if reply == QMessageBox.Yes:
+            # 执行删除
+            conn = self.db.get_connection()
+            cursor = conn.cursor()
+            
+            try:
+                # 删除比对结果
+                cursor.execute("DELETE FROM medical_price_compare_result WHERE compare_batch_id = ?", (batch_id,))
+                
+                # 删除比对批次记录
+                cursor.execute("DELETE FROM medical_compare_batches WHERE batch_id = ?", (batch_id,))
+                
+                conn.commit()
+                
+                QMessageBox.information(self, "成功", "比对批次已删除")
+                self._load_batches()
+                
+            except Exception as e:
+                conn.rollback()
+                QMessageBox.warning(self, "失败", f"删除比对批次失败: {e}")
+    
+    def _save_custom_sql(self):
+        """保存自定义SQL"""
+        sql_content = self.custom_sql_edit.toPlainText().strip()
+        
+        if not sql_content:
+            QMessageBox.warning(self, "提示", "请先输入SQL内容")
+            return
+        
+        conn = self.db.get_connection()
+        cursor = conn.cursor()
+        
+        try:
+            from datetime import datetime
+            now = datetime.now().isoformat()
+            
+            # 保存或更新SQL配置
+            cursor.execute('''
+                INSERT OR REPLACE INTO custom_sql_configs 
+                (config_key, config_name, sql_content, description, created_by, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                'junyuan_price_fetch_sql',
+                '君元价格抓取SQL',
+                sql_content,
+                '君元销售价格抓取的自定义SQL查询语句',
+                self.username,
+                now,
+                now
+            ))
+            
+            conn.commit()
+            QMessageBox.information(self, "成功", "SQL已保存")
+            
+        except Exception as e:
+            QMessageBox.warning(self, "保存失败", f"保存SQL失败: {e}")
+    
+    def _load_saved_sql(self):
+        """读取保存的SQL"""
+        self._load_saved_sql_silent()
+        QMessageBox.information(self, "成功", "已读取保存的SQL")
+    
+    def _load_saved_sql_silent(self):
+        """静默读取保存的SQL（不显示消息框）"""
+        conn = self.db.get_connection()
+        cursor = conn.cursor()
+        
+        try:
+            cursor.execute('''
+                SELECT sql_content FROM custom_sql_configs 
+                WHERE config_key = 'junyuan_price_fetch_sql'
+                ORDER BY updated_at DESC LIMIT 1
+            ''')
+            
+            result = cursor.fetchone()
+            
+            if result and result['sql_content']:
+                self.custom_sql_edit.setText(result['sql_content'])
+            else:
+                # 如果没有保存的SQL，使用默认SQL
+                default_sql = self.fetch_service.DEFAULT_SQL_TEMPLATE.strip()
+                self.custom_sql_edit.setText(default_sql)
+            
+        except Exception as e:
+            # 如果表不存在或其他错误，使用默认SQL
+            default_sql = self.fetch_service.DEFAULT_SQL_TEMPLATE.strip()
+            self.custom_sql_edit.setText(default_sql)
     
     def _run_compare(self):
         """执行比对"""
@@ -671,10 +864,26 @@ class MedicalPriceControlPage(QWidget):
         # 解析批次ID
         batches = {}
         
-        # 医保目录批次 - 多选
-        selected_items = self.medical_catalog_list.selectedItems()
-        if selected_items:
-            medical_batch_ids = [item.data(Qt.UserRole) for item in selected_items]
+        # 西药医保目录批次 - 下拉框单选
+        western_text = self.western_catalog_combo.currentText()
+        western_batch_id = None
+        if western_text and western_text != "自动选择最新":
+            western_batch_id = western_text.split(":")[0]
+        
+        # 中成药医保目录批次 - 下拉框单选
+        chinese_text = self.chinese_catalog_combo.currentText()
+        chinese_batch_id = None
+        if chinese_text and chinese_text != "自动选择最新":
+            chinese_batch_id = chinese_text.split(":")[0]
+        
+        # 合并西药和中成药批次（如果有选择）
+        medical_batch_ids = []
+        if western_batch_id:
+            medical_batch_ids.append(western_batch_id)
+        if chinese_batch_id:
+            medical_batch_ids.append(chinese_batch_id)
+        
+        if medical_batch_ids:
             batches['medical_catalog'] = medical_batch_ids
         else:
             batches['medical_catalog'] = None  # 自动选择最新
@@ -705,19 +914,31 @@ class MedicalPriceControlPage(QWidget):
         self.run_compare_btn.setEnabled(True)
         
         if result.compare_status == "completed":
-            # 更新统计显示
-            self.normal_label.setText(f"正常: {result.normal_count}")
-            self.abnormal_label.setText(f"异常: {result.abnormal_count}")
-            self.severe_label.setText(f"严重异常: {result.severe_count}")
-            self.missing_price_label.setText(f"待补价格: {result.missing_price_count}")
-            self.missing_code_label.setText(f"待补编码: {result.missing_code_count}")
-            self.pending_label.setText(f"待确认: {result.pending_count}")
+            # 计算百分比
+            total = result.total_count or 1  # 避免除零
+            
+            normal_percent = (result.normal_count / total * 100) if total > 0 else 0
+            abnormal_percent = (result.abnormal_count / total * 100) if total > 0 else 0
+            severe_percent = (result.severe_count / total * 100) if total > 0 else 0
+            missing_price_percent = (result.missing_price_count / total * 100) if total > 0 else 0
+            missing_code_percent = (result.missing_code_count / total * 100) if total > 0 else 0
+            pending_percent = (result.pending_count / total * 100) if total > 0 else 0
+            
+            # 更新统计显示（带百分比）
+            self.normal_label.setText(f"正常: {result.normal_count} ({normal_percent:.1f}%)")
+            self.abnormal_label.setText(f"异常: {result.abnormal_count} ({abnormal_percent:.1f}%)")
+            self.severe_label.setText(f"严重异常: {result.severe_count} ({severe_percent:.1f}%)")
+            self.missing_price_label.setText(f"待补价格: {result.missing_price_count} ({missing_price_percent:.1f}%)")
+            self.missing_code_label.setText(f"待补编码: {result.missing_code_count} ({missing_code_percent:.1f}%)")
+            self.pending_label.setText(f"待确认: {result.pending_count} ({pending_percent:.1f}%)")
+            self.total_label.setText(f"总数: {result.total_count}")
             
             QMessageBox.information(
                 self, "比对完成",
                 f"比对完成: 总数 {result.total_count}\n"
-                f"正常 {result.normal_count}, 异常 {result.abnormal_count}, "
-                f"严重异常 {result.severe_count}"
+                f"正常 {result.normal_count} ({normal_percent:.1f}%), "
+                f"异常 {result.abnormal_count} ({abnormal_percent:.1f}%), "
+                f"严重异常 {result.severe_count} ({severe_percent:.1f}%)"
             )
             
             self._load_batches()

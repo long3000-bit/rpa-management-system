@@ -20,28 +20,28 @@ class Database:
         self.conn: Optional[sqlite3.Connection] = None
     
     def get_connection(self) -> sqlite3.Connection:
-        logging.info(f"鏁版嵁搴撹繛鎺?- 鑾峰彇杩炴帴璇锋眰, 褰撳墠杩炴帴鐘舵€? {self.conn is not None}")
+        logging.info(f"数据库连接 - 获取连接请求, 当前连接状态: {self.conn is not None}")
         
         if self.conn is not None:
             try:
-                logging.info("Database log message")
+                logging.info("数据库连接 - 检查现有连接")
                 self.conn.execute("SELECT 1")
-                logging.info(f"鏁版嵁搴撹繛鎺?- 鐜版湁杩炴帴鏈夋晥")
+                logging.info(f"数据库连接 - 现有连接有效")
                 return self.conn
             except Exception as e:
-                logging.warning("Database log message")
+                logging.warning(f"数据库连接 - 现有连接失效: {e}")
                 try:
                     self.conn.close()
-                    logging.info("Database log message")
+                    logging.info("数据库连接 - 关闭失效连接")
                 except Exception as close_error:
-                    logging.warning(f"鏁版嵁搴撹繛鎺?- 鍏抽棴杩炴帴鏃跺嚭閿? {str(close_error)}")
+                    logging.warning(f"数据库连接 - 关闭连接时出错: {str(close_error)}")
                 self.conn = None
         
         if self.conn is None:
-            logging.info(f"鏁版嵁搴撹繛鎺?- 鍒涘缓鏂拌繛鎺? 鏁版嵁搴撹矾寰? {self.db_path}")
+            logging.info(f"数据库连接 - 创建新连接, 数据库路径: {self.db_path}")
             self.conn = sqlite3.connect(self.db_path, timeout=30.0)
             self.conn.row_factory = sqlite3.Row
-            logging.info(f"鏁版嵁搴撹繛鎺?- 鏂拌繛鎺ュ垱寤烘垚鍔? 杩炴帴瀵硅薄: {self.conn}")
+            logging.info(f"数据库连接 - 新连接创建成功, 连接对象: {self.conn}")
         
         return self.conn
     
@@ -681,24 +681,33 @@ class Database:
                 batch_id TEXT NOT NULL,
                 sheet_type TEXT NOT NULL,
                 row_index INTEGER,
-                国家药品代码 TEXT,
-                甲乙类 TEXT,
-                药品名称 TEXT,
-                英文名称 TEXT,
-                剂型 TEXT,
-                规格 TEXT,
-                包装规格 TEXT,
-                计价单位 TEXT,
-                计价规格 TEXT,
-                最小包装单位 TEXT,
+                序号 TEXT,
+                分类编码 TEXT,
+                药品通用名编码 TEXT,
+                医保药品名称 TEXT,
+                医保支付类别 TEXT,
+                医保剂型 TEXT,
+                产品名编码 TEXT,
+                注册名称 TEXT,
+                商品名称 TEXT,
+                实际剂型 TEXT,
+                实际规格 TEXT,
+                包装材质 TEXT,
                 最小包装数量 TEXT,
-                转换比 TEXT,
-                企业名称 TEXT,
-                质量层次 TEXT,
-                备注 TEXT,
-                限制使用范围 TEXT,
-                医保基础价格 TEXT,
+                最小计价单位 TEXT,
+                单位 TEXT,
+                政府定价元 TEXT,
+                省集中采购上限价含企业承诺价 TEXT,
                 医保支付标准 TEXT,
+                批准文号 TEXT,
+                药品企业 TEXT,
+                医保限定支付范围 TEXT,
+                编号 TEXT,
+                招标申报编号 TEXT,
+                备注 TEXT,
+                国家药品代码 TEXT,
+                变更类型 TEXT,
+                变更原因 TEXT,
                 原始数据 TEXT,
                 created_at TEXT NOT NULL
             )
@@ -711,24 +720,33 @@ class Database:
                 batch_id TEXT NOT NULL,
                 sheet_type TEXT NOT NULL,
                 row_index INTEGER,
-                国家药品代码 TEXT,
-                甲乙类 TEXT,
-                药品名称 TEXT,
-                英文名称 TEXT,
-                剂型 TEXT,
-                规格 TEXT,
-                包装规格 TEXT,
-                计价单位 TEXT,
-                计价规格 TEXT,
-                最小包装单位 TEXT,
+                序号 TEXT,
+                分类编码 TEXT,
+                药品通用名编码 TEXT,
+                医保药品名称 TEXT,
+                医保支付类别 TEXT,
+                产品名编码 TEXT,
+                注册名称 TEXT,
+                商品名称 TEXT,
+                实际剂型 TEXT,
+                实际规格 TEXT,
+                包装材质 TEXT,
                 最小包装数量 TEXT,
-                转换比 TEXT,
-                企业名称 TEXT,
-                质量层次 TEXT,
-                备注 TEXT,
-                限制使用范围 TEXT,
-                医保基础价格 TEXT,
+                最小计价单位 TEXT,
+                单位 TEXT,
+                国家药品代码 TEXT,
+                政府定价元 TEXT,
+                省集中采购上限价含企业承诺价 TEXT,
                 医保支付标准 TEXT,
+                批准文号 TEXT,
+                药品企业 TEXT,
+                医保限定支付范围 TEXT,
+                编号 TEXT,
+                招标申报编号 TEXT,
+                备注 TEXT,
+                国家药品代码2 TEXT,
+                变更类型 TEXT,
+                变更原因 TEXT,
                 原始数据 TEXT,
                 created_at TEXT NOT NULL
             )
@@ -740,16 +758,17 @@ class Database:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 batch_id TEXT NOT NULL,
                 row_index INTEGER,
+                分组名称 TEXT,
+                三同药品挂网最低单片价 TEXT,
                 医保编码 TEXT,
                 药品名称 TEXT,
+                通用名 TEXT,
                 剂型 TEXT,
                 规格 TEXT,
-                包装规格 TEXT,
-                计价单位 TEXT,
-                企业名称 TEXT,
-                医保价格上限 TEXT,
-                价格生效日期 TEXT,
-                备注 TEXT,
+                生产企业 TEXT,
+                转换比 TEXT,
+                三同药品参比价 TEXT,
+                数据时间 TEXT,
                 原始数据 TEXT,
                 created_at TEXT NOT NULL
             )
@@ -796,12 +815,33 @@ class Database:
                 包装价 TEXT,
                 单片价 TEXT,
                 拆零价 TEXT,
+                库存数量 TEXT,
                 价格类型 TEXT,
                 价格更新时间 TEXT,
                 抓取状态 TEXT DEFAULT 'success',
                 原始数据 TEXT,
                 created_at TEXT NOT NULL
             )
+        ''')
+        
+        # 自定义SQL配置表
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS custom_sql_configs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                config_key TEXT NOT NULL UNIQUE,
+                config_name TEXT NOT NULL,
+                sql_content TEXT NOT NULL,
+                description TEXT,
+                created_by TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+        ''')
+        
+        # 创建索引
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_custom_sql_config_key 
+            ON custom_sql_configs(config_key)
         ''')
         
         # 表间关联结果表
@@ -833,13 +873,22 @@ class Database:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 compare_batch_id TEXT NOT NULL,
                 医保编码 TEXT,
+                西药医保编码 TEXT,
+                中成药医保编码 TEXT,
+                三同医保编码 TEXT,
                 国家药品代码 TEXT,
                 商品编码 TEXT,
                 旧商品编码 TEXT,
                 商品名称 TEXT,
                 规格 TEXT,
                 生产厂家 TEXT,
+                君元商品编码 TEXT,
+                君元商品名称 TEXT,
+                君元规格 TEXT,
+                君元生产厂家 TEXT,
+                君元库存数量 TEXT,
                 医保基础价格 TEXT,
+                医保基础价格_中成药 TEXT,
                 医保价格上限 TEXT,
                 君元销售价 TEXT,
                 君元包装价 TEXT,
@@ -931,12 +980,13 @@ class Database:
         self._migrate_update_permission_names_for_consistency()
         self._migrate_fill_created_by_for_historical_data()
         self._migrate_user_roles_from_single_role()
+        self._migrate_add_raw_data_columns_full()
         
         self._create_default_admin_if_not_exists()
         self._init_app_settings()
         self._init_default_roles_and_permissions()
         
-        logging.info("鏁版嵁搴撳垵濮嬪寲瀹屾垚")
+        logging.info("数据库初始化完成")
     
     def _migrate_add_raw_data_columns(self):
         conn = self.get_connection()
@@ -948,7 +998,7 @@ class Database:
             
             if 'raw_data' not in columns:
                 cursor.execute("ALTER TABLE ysb_detail_data ADD COLUMN raw_data TEXT")
-                logging.info("鉁?涓?ysb_detail_data 琛ㄦ坊鍔?raw_data 瀛楁")
+                logging.info("✓ 为 ysb_detail_data 表添加 raw_data 字段")
             
             conn.commit()
         except Exception as e:
@@ -956,7 +1006,7 @@ class Database:
             conn.rollback()
 
     def _migrate_add_role_code_column(self):
-        """涓簎sers琛ㄦ坊鍔爎ole_code瀛楁"""
+        """为users表添加role_code字段"""
         conn = self.get_connection()
         cursor = conn.cursor()
         
@@ -966,9 +1016,9 @@ class Database:
             
             if 'role_code' not in columns:
                 cursor.execute("ALTER TABLE users ADD COLUMN role_code TEXT")
-                logging.info("鉁?涓?users 琛ㄦ坊鍔?role_code 瀛楁")
+                logging.info("✓ 为 users 表添加 role_code 字段")
                 
-                # 灏嗙幇鏈夌敤鎴风殑role瀛楁鍊艰縼绉诲埌role_code瀛楁
+                # 将现有用户的role字段值迁移到role_code字段
             cursor.execute('''
                 UPDATE users
                 SET role_code = CASE
@@ -986,7 +1036,7 @@ class Database:
             conn.commit()
             logging.info("Migrated users.role to users.role_code")
         except Exception as e:
-            logging.warning(f"杩佺移role_code字段时出错: {e}")
+            logging.warning(f"迁移role_code字段时出错: {e}")
     
     def _migrate_add_users_security_fields(self):
         """为users表添加安全字段"""
@@ -1337,6 +1387,16 @@ class Database:
             ('operation.medical_price.run_compare', '执行价格比对', 'operation', 'menu.medical_price_control', '执行医保价格比对', 195),
             ('operation.medical_price.handle_result', '处理比对结果', 'operation', 'menu.medical_price_control', '处理价格比对异常结果', 196),
             ('operation.medical_price.export_result', '导出比对结果', 'operation', 'menu.medical_price_control', '导出价格比对结果', 197),
+            ('menu.medical_price_compare', '价格比对', 'menu', 'menu.medical_price_control', '价格比对菜单', 198),
+            ('menu.medical_compare_result_query', '比对结果查询', 'menu', 'menu.medical_price_control', '比对结果查询菜单', 199),
+            ('menu.medical_western_query', '医保西药查询', 'menu', 'menu.medical_price_control', '医保西药目录查询菜单', 200),
+            ('menu.medical_chinese_query', '医保中成药查询', 'menu', 'menu.medical_price_control', '医保中成药目录查询菜单', 201),
+            ('menu.medical_price_limit_query', '价格上限查询', 'menu', 'menu.medical_price_control', '医保价格上限查询菜单', 202),
+            ('menu.medical_cloud_catalog_query', '商品信息查询', 'menu', 'menu.medical_price_control', '云药店商品信息查询菜单', 203),
+            ('menu.system_management', '系统管理', 'menu', None, '系统管理菜单', 220),
+            ('menu.tts', '文本转语音', 'menu', 'menu.system_management', '文本转语音菜单', 221),
+            ('operation.tts.generate', '生成语音', 'operation', 'menu.tts', '生成文本转语音', 222),
+            ('operation.tts.download', '下载音频', 'operation', 'menu.tts', '下载生成的音频文件', 223),
         ]
         
         for permission_code, permission_name, permission_type, parent_code, description, sort_order in permissions_data:
@@ -1381,6 +1441,16 @@ class Database:
             'operation.medical_price.run_compare',
             'operation.medical_price.handle_result',
             'operation.medical_price.export_result',
+            'menu.medical_price_compare',
+            'menu.medical_compare_result_query',
+            'menu.medical_western_query',
+            'menu.medical_chinese_query',
+            'menu.medical_price_limit_query',
+            'menu.medical_cloud_catalog_query',
+            'menu.system_management',
+            'menu.tts',
+            'operation.tts.generate',
+            'operation.tts.download',
             'operation.config.save_supplier_scope',
         ]
         
@@ -1404,14 +1474,14 @@ class Database:
             
             if 'raw_data' not in columns:
                 cursor.execute("ALTER TABLE ysb_detail_data ADD COLUMN raw_data TEXT")
-                logging.info("鉁?涓?ysb_detail_data 琛ㄦ坊鍔?raw_data 瀛楁")
+                logging.info("✓ 为 ysb_detail_data 表添加 raw_data 字段")
             
             cursor.execute("PRAGMA table_info(ysb_supplier_summary)")
             columns = [row['name'] for row in cursor.fetchall()]
             
             if 'raw_data' not in columns:
                 cursor.execute("ALTER TABLE ysb_supplier_summary ADD COLUMN raw_data TEXT")
-                logging.info("鉁?涓?ysb_supplier_summary 琛ㄦ坊鍔?raw_data 瀛楁")
+                logging.info("✓ 为 ysb_supplier_summary 表添加 raw_data 字段")
             
             cursor.execute("DROP INDEX IF EXISTS idx_ysb_supplier_unique")
             cursor.execute('''
@@ -1433,7 +1503,7 @@ class Database:
             for field_name, field_type in fields_to_add:
                 if field_name not in columns:
                     cursor.execute(f"ALTER TABLE reconciliation_tasks ADD COLUMN {field_name} {field_type}")
-                    logging.info(f"鉁?涓?reconciliation_tasks 琛ㄦ坊鍔?{field_name} 瀛楁")
+                    logging.info(f"✓ 为 reconciliation_tasks 表添加 {field_name} 字段")
             
             cursor.execute("PRAGMA table_info(ysb_import_batches)")
             columns = [row['name'] for row in cursor.fetchall()]
@@ -1446,7 +1516,7 @@ class Database:
             for field_name, field_type in ysb_batch_fields:
                 if field_name not in columns:
                     cursor.execute(f"ALTER TABLE ysb_import_batches ADD COLUMN {field_name} {field_type}")
-                    logging.info(f"鉁?涓?ysb_import_batches 琛ㄦ坊鍔?{field_name} 瀛楁")
+                    logging.info(f"✓ 为 ysb_import_batches 表添加 {field_name} 字段")
             
             cursor.execute("PRAGMA table_info(yys_import_detail)")
             columns = [row['name'] for row in cursor.fetchall()]
@@ -1459,9 +1529,10 @@ class Database:
             for field_name, field_type in yys_detail_fields:
                 if field_name not in columns:
                     cursor.execute(f"ALTER TABLE yys_import_detail ADD COLUMN {field_name} {field_type}")
-                    logging.info(f"鉁?涓?yys_import_detail 琛ㄦ坊鍔?{field_name} 瀛楁")
+                    logging.info(f"✓ 为 yys_import_detail 表添加 {field_name} 字段")
             
-            # 涓?jy_stock_query 琛ㄦ坊鍔犲瓧娈?            cursor.execute("PRAGMA table_info(jy_stock_query)")
+            # 为 jy_stock_query 表添加字段
+            cursor.execute("PRAGMA table_info(jy_stock_query)")
             jy_columns = [row['name'] for row in cursor.fetchall()]
             
             jy_fields = [
@@ -1472,11 +1543,45 @@ class Database:
             for field_name, field_type in jy_fields:
                 if field_name not in jy_columns:
                     cursor.execute(f"ALTER TABLE jy_stock_query ADD COLUMN {field_name} {field_type}")
-                    logging.info(f"鉁?涓?jy_stock_query 琛ㄦ坊鍔?{field_name} 瀛楁")
+                    logging.info(f"✓ 为 jy_stock_query 表添加 {field_name} 字段")
+            
+            # 为 junyuan_sales_price 表添加库存数量字段
+            cursor.execute("PRAGMA table_info(junyuan_sales_price)")
+            jy_sales_columns = [row['name'] for row in cursor.fetchall()]
+            
+            jy_sales_fields = [
+                ('库存数量', 'TEXT'),
+            ]
+            
+            for field_name, field_type in jy_sales_fields:
+                if field_name not in jy_sales_columns:
+                    cursor.execute(f"ALTER TABLE junyuan_sales_price ADD COLUMN {field_name} {field_type}")
+                    logging.info(f"✓ 为 junyuan_sales_price 表添加 {field_name} 字段")
+            
+            # 为 medical_price_compare_result 表添加君元商品字段
+            cursor.execute("PRAGMA table_info(medical_price_compare_result)")
+            medical_columns = [row['name'] for row in cursor.fetchall()]
+            
+            medical_fields = [
+                ('君元商品编码', 'TEXT'),
+                ('君元商品名称', 'TEXT'),
+                ('君元规格', 'TEXT'),
+                ('君元生产厂家', 'TEXT'),
+                ('君元库存数量', 'TEXT'),
+                ('医保基础价格_中成药', 'TEXT'),
+                ('西药医保编码', 'TEXT'),
+                ('中成药医保编码', 'TEXT'),
+                ('三同医保编码', 'TEXT'),
+            ]
+            
+            for field_name, field_type in medical_fields:
+                if field_name not in medical_columns:
+                    cursor.execute(f"ALTER TABLE medical_price_compare_result ADD COLUMN {field_name} {field_type}")
+                    logging.info(f"✓ 为 medical_price_compare_result 表添加 {field_name} 字段")
             
             conn.commit()
         except Exception as e:
-            logging.warning(f"鏁版嵁搴撹縼绉诲け璐ワ紙瀛楁鍙兘宸插瓨鍦級: {e}")
+            logging.warning(f"数据库迁移失败（字段可能已存在）: {e}")
             conn.rollback()
     
     def _create_default_admin_if_not_exists(self):

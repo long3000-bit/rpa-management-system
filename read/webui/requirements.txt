@@ -1,0 +1,4 @@
+-e ../edge-tts
+Flask>=3.0.0
+# 可选：下面这个包会自动下载一个内置 ffmpeg 二进制，用于背景音乐混音功能
+imageio-ffmpeg>=0.5.0
