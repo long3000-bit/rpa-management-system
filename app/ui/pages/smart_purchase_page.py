@@ -172,14 +172,21 @@ class SmartPurchasePage(QWidget):
         self.supplier_scope_input = QLineEdit()
         self.supplier_scope_input.setPlaceholderText("例如：小药精, 采药易, 药中缘；每次采购前需重新确认")
         rule_row.addWidget(self.supplier_scope_input)
-        
+
         self.save_supplier_scope_btn = QPushButton("保存配置")
         self.save_supplier_scope_btn.clicked.connect(self._save_purchase_settings)
         rule_row.addWidget(self.save_supplier_scope_btn)
-        
+
         self.keep_cart_check = QCheckBox("允许购物车保留原有商品")
         self.keep_cart_check.setChecked(True)
         rule_row.addWidget(self.keep_cart_check)
+
+        rule_row.addSpacing(20)
+        rule_row.addWidget(QLabel("评分规则:"))
+        self.rule_set_combo = QComboBox()
+        self.rule_set_combo.setMinimumWidth(200)
+        self._load_rule_sets()
+        rule_row.addWidget(self.rule_set_combo)
         import_layout.addLayout(rule_row)
         
         layout.addWidget(import_group)
@@ -286,6 +293,28 @@ class SmartPurchasePage(QWidget):
             self.supplier_scope_input.setText(supplier_scope)
         if keep_cart is not None:
             self.keep_cart_check.setChecked(keep_cart == "1")
+
+    def _load_rule_sets(self):
+        """加载可用规则集到下拉框"""
+        from app.core.rule_selection_service import RuleSelectionService
+        self.rule_set_combo.clear()
+        try:
+            service = RuleSelectionService(self.db)
+            rule_sets = service.get_available_rule_sets()
+            for rs in rule_sets:
+                label = rs["rule_set_name"] or rs["rule_set_code"]
+                if rs["is_default"]:
+                    label += " (默认)"
+                if not rs.get("available_for_purchase", True):
+                    label += " [不可用]"
+                self.rule_set_combo.addItem(label, rs["rule_set_code"])
+        except Exception as e:
+            self.rule_set_combo.addItem("默认规则 (default_v1)", "default_v1")
+
+    def _get_selected_rule_set_code(self) -> str:
+        """获取当前选中的规则集代码"""
+        data = self.rule_set_combo.currentData()
+        return data if data else "default_v1"
     
     def _save_purchase_settings(self, show_message: bool = True):
         # 权限检查
@@ -429,14 +458,14 @@ class SmartPurchasePage(QWidget):
             "row_number", "item_code", "source_name", "source_spec", "source_maker",
             "source_approval", "purchase_quantity", "expected_price",
             "smart_supplier", "smart_price", "ysb_code", "import_status",
-            "purchase_status", "purchase_reason", "actual_ysb_code",
+            "purchase_status", "purchase_reason", "cart_write_status", "cart_write_message", "actual_ysb_code",
             "purchase_supplier", "purchase_product", "purchase_spec", "purchase_maker",
             "purchase_valid_date", "purchase_quantity_result", "purchase_price"
         ]
         headers = [
             "行号", "商品编码", "商品名称", "规格", "厂家", "批准文号",
             "采购数量", "期望价格", "智能供应商", "智能价格",
-            "药师帮编码", "导入状态", "采购状态", "原因", "实际药师帮编码",
+            "药师帮编码", "导入状态", "采购状态", "原因", "购物车反写状态", "购物车反写信息", "实际药师帮编码",
             "采购供应商", "采购商品", "采购规格", "采购厂家", "有效期", "采购数量结果", "采购价格",
         ]
         
@@ -562,7 +591,19 @@ class SmartPurchasePage(QWidget):
         
         if self.cart_adapter_check.isChecked() and not self._ensure_ysbang_browser_ready():
             return
-        
+
+        # 三期整改：将UI选择的规则集保存到批次
+        selected_rule_set = self._get_selected_rule_set_code()
+        if selected_rule_set and batch_id:
+            try:
+                from app.core.rule_selection_service import RuleSelectionService
+                selection_service = RuleSelectionService(self.db)
+                selection = selection_service.resolve_rule_set(batch_id, manual_rule_set_code=selected_rule_set)
+                selection_service.save_rule_selection_to_batch(batch_id, selection, selected_by=self.username or "")
+                self._append_log(f"评分规则: {selection['rule_set_code']} (模式: {selection['rule_select_mode']})")
+            except Exception as e:
+                self._append_log(f"规则选择保存失败: {e}")
+
         self.start_purchase_btn.setEnabled(False)
         self.retry_btn.setEnabled(False)
         self.cart_backfill_btn.setEnabled(False)
@@ -610,15 +651,29 @@ class SmartPurchasePage(QWidget):
             QMessageBox.warning(self, "错误", f"执行失败:\n{error}")
             self._append_log(f"执行失败：{error}")
         else:
-            QMessageBox.information(
-                self,
-                "执行完成",
-                f"逐个采购处理完成\n"
-                f"总数: {summary.get('total', 0)}\n"
-                f"成功: {summary.get('success', 0)}\n"
-                f"失败: {summary.get('failed', 0)}\n"
-                f"跳过: {summary.get('skipped', 0)}"
-            )
+            # 增强执行完成弹窗展示失败原因 Top 3（方案要求：从logs中提取Top 3摘要并拼接到弹窗正文）
+            message = f"逐个采购处理完成\n" \
+                      f"总数: {summary.get('total', 0)}\n" \
+                      f"成功: {summary.get('success', 0)}\n" \
+                      f"失败: {summary.get('failed', 0)}\n" \
+                      f"跳过: {summary.get('skipped', 0)}"
+            
+            # 如果失败数大于0，从logs中提取失败原因Top 3摘要
+            if summary.get('failed', 0) > 0:
+                # 从logs中查找失败原因Top 3摘要
+                top3_summary = None
+                for log in logs:
+                    if "失败原因 Top 3 分类摘要" in log:
+                        # 提取Top 3摘要内容
+                        top3_summary = log
+                        break
+                
+                # 如果找到了Top 3摘要，拼接到弹窗正文
+                if top3_summary:
+                    message += f"\n\n{top3_summary}"
+            
+            QMessageBox.information(self, "执行完成", message)
+            
             self._append_log(
                 f"执行完成：总{summary.get('total', 0)}，"
                 f"成功{summary.get('success', 0)}，失败{summary.get('failed', 0)}，跳过{summary.get('skipped', 0)}"

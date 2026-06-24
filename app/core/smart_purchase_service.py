@@ -16,6 +16,9 @@ import openpyxl
 import xlrd
 
 from app.storage.database import Database
+from app.core.rule_snapshot_service import RuleSnapshotService
+from app.core.failure_reason_service import FailureReasonService
+from app.core.rule_selection_service import RuleSelectionService
 
 
 class SmartPurchaseService:
@@ -47,6 +50,9 @@ class SmartPurchaseService:
     
     def __init__(self, db: Database):
         self.db = db
+        self._rule_snapshot_service = RuleSnapshotService(db)
+        self._failure_reason_service = FailureReasonService(db)
+        self._rule_selection_service = RuleSelectionService(db)
         self._ensure_tables()
     
     def _ensure_tables(self):
@@ -67,7 +73,14 @@ class SmartPurchaseService:
                 status TEXT DEFAULT 'imported',
                 created_by TEXT,
                 imported_at TEXT,
-                created_at TEXT
+                created_at TEXT,
+                rule_set_code TEXT,
+                rule_set_version TEXT,
+                rule_select_mode TEXT DEFAULT 'default',
+                rule_select_reason TEXT,
+                rule_snapshot_id TEXT,
+                rule_selected_by TEXT,
+                rule_selected_at TEXT
             )
         ''')
         
@@ -114,6 +127,8 @@ class SmartPurchaseService:
                 purchase_reason TEXT,
                 candidate_count INTEGER DEFAULT 0,
                 executed_at TEXT,
+                failure_stage TEXT,
+                failure_code TEXT,
                 created_at TEXT,
                 updated_at TEXT
             )
@@ -140,6 +155,18 @@ class SmartPurchaseService:
             cursor.execute("ALTER TABLE smart_purchase_items ADD COLUMN actual_ysb_code TEXT")
         if "purchase_valid_date" not in columns:
             cursor.execute("ALTER TABLE smart_purchase_items ADD COLUMN purchase_valid_date TEXT")
+        
+        # 四期整改：购物车反写状态独立设计
+        cart_write_columns = {
+            "cart_write_status": "TEXT DEFAULT 'NOT_STARTED'",  # 购物车反写状态
+            "cart_write_time": "TEXT",  # 购物车反写时间
+            "cart_write_message": "TEXT",  # 购物车反写信息
+            "cart_item_id": "TEXT",  # 购物车商品标识
+            "cart_write_attempts": "INTEGER DEFAULT 0",  # 购物车反写次数
+        }
+        for col_name, col_def in cart_write_columns.items():
+            if col_name not in columns:
+                cursor.execute(f"ALTER TABLE smart_purchase_items ADD COLUMN {col_name} {col_def}")
     
     def _is_xls_file(self, file_path: str) -> bool:
         return Path(file_path).suffix.lower() == ".xls"
@@ -453,7 +480,9 @@ class SmartPurchaseService:
                    validation_message, purchase_status, purchase_supplier,
                    purchase_product, purchase_spec, purchase_maker,
                    purchase_quantity_result, purchase_price, purchase_reason,
-                   candidate_count, executed_at, activity_type
+                   candidate_count, executed_at, activity_type,
+                   cart_write_status, cart_write_time, cart_write_message,
+                   cart_item_id, cart_write_attempts
             FROM smart_purchase_items
             WHERE batch_id = ?
         '''
@@ -493,7 +522,12 @@ class SmartPurchaseService:
             logging.error(f"删除智能采购批次失败: {e}")
             return False, str(e)
     
-    def _clear_purchase_backfill_history(self, batch_id: str, remove_cart_extra: bool = True) -> int:
+    def _clear_purchase_backfill_history(
+        self,
+        batch_id: str,
+        remove_cart_extra: bool = True,
+        preserve_purchase_result: bool = False,
+    ) -> int:
         conn = self.db.get_connection()
         cursor = conn.cursor()
         removed = 0
@@ -504,25 +538,43 @@ class SmartPurchaseService:
                   AND (business_key LIKE 'CART_EXTRA_%' OR activity_type = 'cart_extra')
             ''', (batch_id,))
             removed = cursor.rowcount if cursor.rowcount is not None else 0
-        cursor.execute('''
-            UPDATE smart_purchase_items
-            SET purchase_status = 'pending',
-                purchase_supplier = '',
-                purchase_product = '',
-                purchase_spec = '',
-                purchase_maker = '',
-                purchase_quantity_result = '',
-                actual_purchase_quantity = '',
-                purchase_price = '',
-                max_allowed_price = '',
-                purchase_reason = '',
-                actual_ysb_code = '',
-                candidate_count = 0,
-                executed_at = '',
-                updated_at = ?
-            WHERE batch_id = ?
-              AND import_status = 'valid'
-        ''', (datetime.now().isoformat(), batch_id))
+        if preserve_purchase_result:
+            cursor.execute('''
+                UPDATE smart_purchase_items
+                SET cart_write_status = 'NOT_STARTED',
+                    cart_write_time = '',
+                    cart_write_message = '',
+                    cart_item_id = '',
+                    cart_write_attempts = 0,
+                    updated_at = ?
+                WHERE batch_id = ?
+                  AND import_status = 'valid'
+            ''', (datetime.now().isoformat(), batch_id))
+        else:
+            cursor.execute('''
+                UPDATE smart_purchase_items
+                SET purchase_status = 'pending',
+                    purchase_supplier = '',
+                    purchase_product = '',
+                    purchase_spec = '',
+                    purchase_maker = '',
+                    purchase_quantity_result = '',
+                    actual_purchase_quantity = '',
+                    purchase_price = '',
+                    max_allowed_price = '',
+                    purchase_reason = '',
+                    actual_ysb_code = '',
+                    candidate_count = 0,
+                    executed_at = '',
+                    cart_write_status = 'NOT_STARTED',
+                    cart_write_time = '',
+                    cart_write_message = '',
+                    cart_item_id = '',
+                    cart_write_attempts = 0,
+                    updated_at = ?
+                WHERE batch_id = ?
+                  AND import_status = 'valid'
+            ''', (datetime.now().isoformat(), batch_id))
         conn.commit()
         if remove_cart_extra:
             self._refresh_batch_counts(batch_id)
@@ -565,7 +617,7 @@ class SmartPurchaseService:
             
             for item in items:
                 result = self._execute_single_item(item, supplier_scope)
-                self._save_purchase_result(item["item_id"], result)
+                self._save_purchase_result(item["item_id"], result, batch_id=batch_id)
                 
                 status = result["purchase_status"]
                 if status == "success":
@@ -598,7 +650,14 @@ class SmartPurchaseService:
         try:
             batch = self.get_batch(batch_id)
             if not batch:
-                return {}, [], "采购批次不存在"
+                # 增强批次不存在提示（方案要求：提示批次ID和批次状态统计）
+                error_msg = f"采购批次不存在（批次ID: {batch_id}）。请检查批次是否已删除或批次ID是否正确。建议：请确认批次ID后再执行。"
+                return {}, [], error_msg
+
+            if use_cart_adapter:
+                adapter_syntax_error = self._check_cart_adapter_syntax()
+                if adapter_syntax_error:
+                    return {}, [], f"购物车执行脚本语法检查失败，已停止本批次：{adapter_syntax_error}"
             
             if not retry_failed:
                 self._clear_purchase_backfill_history(batch_id, remove_cart_extra=True)
@@ -607,7 +666,29 @@ class SmartPurchaseService:
             summary = {"total": len(items), "success": 0, "failed": 0, "skipped": 0}
             logs = []
             if not items:
-                return summary, ["没有可执行的采购明细"], ""
+                # 增强无可执行明细提示（方案要求：提示总行数、成功行数、失败行数、跳过行数）
+                all_count = status_counts.get('all', 0)
+                success_count = status_counts.get('success', 0)
+                failed_count = status_counts.get('failed', 0)
+                pending_count = status_counts.get('pending', 0)
+                other_count = status_counts.get('other', 0)
+                
+                if retry_failed:
+                    # 重试失败时，提示失败明细情况
+                    error_msg = (
+                        f"当前批次没有可重试的失败明细。\n"
+                        f"批次状态统计：总行数 {all_count}，已成功 {success_count} 行，失败 {failed_count} 行，待执行 {pending_count} 行，其他 {other_count} 行。\n"
+                        f"建议：如果失败明细已全部重试成功，请选择'开始逐个采购'而非'重试失败明细'。"
+                    )
+                else:
+                    # 开始逐个采购时，提示批次状态
+                    error_msg = (
+                        f"当前批次没有可执行的采购明细。\n"
+                        f"批次状态统计：总行数 {all_count}，已成功 {success_count} 行，失败 {failed_count} 行，待执行 {pending_count} 行，其他 {other_count} 行。\n"
+                        f"建议：如果所有明细都已执行完成，请查看执行结果或导出采购结果。"
+                    )
+                
+                return summary, [error_msg], ""
             
             trace_path = self._create_purchase_trace_path(batch_id)
             self._append_purchase_trace(
@@ -632,6 +713,50 @@ class SmartPurchaseService:
                 progress_callback(f"本次逐个采购日志：{trace_path}")
             
             supplier_scope = self._parse_supplier_scope(batch.get("supplier_scope", ""))
+
+            # 三期整改：通过 RuleSelectionService 解析规则集
+            # 优先使用批次已保存的规则集，否则使用默认规则
+            saved_rule_set_code = self._rule_selection_service.get_batch_rule_set_code(batch_id)
+            rule_selection = self._rule_selection_service.resolve_rule_set(
+                batch_id, manual_rule_set_code=saved_rule_set_code
+            )
+            resolved_rule_set_code = rule_selection["rule_set_code"]
+            rule_select_mode = rule_selection["rule_select_mode"]
+
+            # 保存规则选择结果到批次
+            self._rule_selection_service.save_rule_selection_to_batch(batch_id, rule_selection)
+
+            # 三期整改：将实际规则集传入快照生成
+            rule_snapshot_id, snapshot_error = self._rule_snapshot_service.generate_rule_snapshot(
+                batch_id, resolved_rule_set_code
+            )
+            if rule_snapshot_id:
+                # 将快照ID回写批次
+                conn = self.db.get_connection()
+                cursor = conn.cursor()
+                cursor.execute(
+                    "UPDATE smart_purchase_batches SET rule_snapshot_id = ? WHERE batch_id = ?",
+                    (rule_snapshot_id, batch_id)
+                )
+                conn.commit()
+                self._append_purchase_trace(
+                    trace_path,
+                    f"RULE_SNAPSHOT_GENERATED snapshot_id={rule_snapshot_id} "
+                    f"rule_set={resolved_rule_set_code} mode={rule_select_mode}",
+                    progress_callback
+                )
+            else:
+                self._append_purchase_trace(
+                    trace_path,
+                    f"RULE_SNAPSHOT_FAILED rule_set={resolved_rule_set_code} error={snapshot_error}",
+                    progress_callback
+                )
+            
+            # 获取规则快照配置（供Node使用）
+            rule_config_for_node = {}
+            if rule_snapshot_id:
+                rule_config_for_node = self._rule_snapshot_service.get_rule_config_for_node(rule_snapshot_id)
+            
             ready_items = []
             ready_results = {}
             
@@ -653,12 +778,17 @@ class SmartPurchaseService:
                     progress_callback
                 )
                 if result.get("ready_for_cart"):
-                    adapter_item = self._build_cart_adapter_item(item, result, supplier_scope)
+                    adapter_item = self._build_cart_adapter_item(
+                        item, result, supplier_scope,
+                        rule_config=rule_config_for_node,
+                        rule_snapshot_id=rule_snapshot_id
+                    )
                     ready_items.append(adapter_item)
                     ready_results[item["item_id"]] = result
                     continue
                 
-                self._save_purchase_result(item["item_id"], result)
+                self._save_purchase_result(item["item_id"], result, batch_id=batch_id,
+                                           rule_snapshot_id=rule_snapshot_id, rule_set_code=resolved_rule_set_code)
                 status = result.get("purchase_status", "failed")
                 summary[status if status in summary else "failed"] += 1
                 logs.append(
@@ -673,6 +803,7 @@ class SmartPurchaseService:
                     progress_callback
                 )
                 original_ready_items = list(ready_items)
+                successful_cart_results = []
                 for index, adapter_item in enumerate(original_ready_items, start=1):
                     if pause_callback and pause_callback():
                         skipped_count = len(original_ready_items) - index + 1
@@ -695,7 +826,7 @@ class SmartPurchaseService:
                             progress_callback,
                             stop_callback=pause_callback,
                         )
-                        adapter_results = self._handle_web_error_retry(
+                        adapter_results, batch_aborted, abort_reason = self._handle_web_error_retry(
                             batch_id,
                             [adapter_item],
                             adapter_results,
@@ -706,6 +837,8 @@ class SmartPurchaseService:
                         )
                     else:
                         adapter_results = self._adapter_failure_results([adapter_item], "未启用药师帮购物车真实加购，未执行加购")
+                        batch_aborted = False
+                        abort_reason = ""
                         self._append_purchase_trace(trace_path, "CART_ADAPTER_SKIPPED disabled", progress_callback)
                     if not adapter_results:
                         adapter_results = self._adapter_failure_results([adapter_item], "购物车执行器未返回本行结果")
@@ -721,27 +854,13 @@ class SmartPurchaseService:
                             )
                             continue
                         result = self._merge_cart_adapter_result(base_result, adapter_result)
-                        if use_cart_adapter and result.get("purchase_status") in ("success", "skipped"):
-                            cart_items = self._run_cart_snapshot(batch_id, trace_path, progress_callback)
-                            self._append_purchase_trace(
-                                trace_path,
-                                f"CART_BACKFILL_SNAPSHOT count={len(cart_items)} row={adapter_result.get('rowNumber', '')}",
-                                progress_callback
-                            )
-                            backfilled = self._apply_cart_backfill_to_result(result, adapter_item, cart_items, adapter_result)
-                            self._append_purchase_trace(
-                                trace_path,
-                                f"CART_BACKFILL row={adapter_result.get('rowNumber', '')} "
-                                f"item_id={item_id} matched={backfilled.get('matched', False)} "
-                                f"score={backfilled.get('score', '')} "
-                                f"wholesale_id={backfilled.get('wholesaleId', '')} "
-                                f"supplier={backfilled.get('supplier', '')} "
-                                f"reason={backfilled.get('reason', '')}",
-                                progress_callback
-                            )
-                        self._save_purchase_result(item_id, result)
+                        self._save_purchase_result(item_id, result, batch_id=batch_id,
+                                                   rule_snapshot_id=rule_snapshot_id, rule_set_code=resolved_rule_set_code)
                         status = result.get("purchase_status", "failed")
+                        if use_cart_adapter and status in ("success", "skipped"):
+                            successful_cart_results.append((item_id, adapter_item, adapter_result, result))
                         summary[status if status in summary else "failed"] += 1
+                        display_reason = self._result_display_reason(result)
                         self._append_purchase_trace(
                             trace_path,
                             f"WRITE_RESULT row={adapter_result.get('rowNumber', '')} item_id={item_id} "
@@ -751,95 +870,53 @@ class SmartPurchaseService:
                             f"match_source={adapter_result.get('matchSource', '')} "
                             f"match_score={adapter_result.get('matchScore', '')} "
                             f"match_reason={adapter_result.get('matchReason', '')} "
-                            f"reason={result.get('purchase_reason', '')}",
+                            f"reason={display_reason}",
                             progress_callback
                         )
                         logs.append(
                             f"第{adapter_result.get('rowNumber', '')}行 {adapter_result.get('name', '')}: "
-                            f"{self._status_text(status)} - {result.get('purchase_reason', '')}"
+                            f"{self._status_text(status)} - {display_reason}"
                         )
                         if progress_callback:
                             progress_callback(
                                 f"进度 {index}/{len(original_ready_items)} 行{adapter_result.get('rowNumber', '')}: "
-                                f"{self._status_text(status)} - {result.get('purchase_reason', '')}"
+                                f"{self._status_text(status)} - {display_reason}"
                             )
-                ready_items = []
-                use_cart_adapter = False
-                if use_cart_adapter:
-                    self._append_purchase_trace(trace_path, f"CART_ADAPTER_START ready_count={len(ready_items)}", progress_callback)
-                    adapter_results = self._run_cart_adapter_batch(
-                        batch_id,
-                        ready_items,
-                        trace_path,
-                        progress_callback,
-                        stop_callback=pause_callback,
-                    )
-                    adapter_results = self._handle_web_error_retry(
-                        batch_id,
-                        ready_items,
-                        adapter_results,
-                        trace_path,
-                        progress_callback,
-                        web_error_callback,
-                        stop_callback=pause_callback,
-                    )
-                else:
-                    adapter_results = self._adapter_failure_results(ready_items, "未启用药师帮购物车真实加购，未执行加购")
-                    self._append_purchase_trace(trace_path, "CART_ADAPTER_SKIPPED disabled", progress_callback)
-                
-                cart_items = []
-                adapter_item_by_id = {item.get("itemId", ""): item for item in ready_items}
-                if use_cart_adapter:
-                    cart_items = self._run_cart_snapshot(batch_id, trace_path, progress_callback)
-                    self._append_purchase_trace(
-                        trace_path,
-                        f"CART_BACKFILL_SNAPSHOT count={len(cart_items)}",
-                        progress_callback
-                    )
-                
-                for adapter_result in adapter_results:
-                    item_id = adapter_result.get("itemId", "")
-                    base_result = ready_results.get(item_id)
-                    if not base_result:
+                    if batch_aborted:
+                        remaining_count = len(original_ready_items) - index
+                        summary["skipped"] += remaining_count
+                        message = (
+                            f"本批次已停止：{abort_reason or '药师帮网页异常'}；"
+                            f"剩余 {remaining_count} 条保持未执行"
+                        )
+                        logs.append(message)
                         self._append_purchase_trace(
                             trace_path,
-                            f"CART_RESULT_IGNORED item_id={item_id} result={json.dumps(adapter_result, ensure_ascii=False)}",
-                            progress_callback
+                            f"BATCH_ABORTED row={adapter_result.get('rowNumber', '')} "
+                            f"remaining={remaining_count} reason={abort_reason}",
+                            progress_callback,
                         )
-                        continue
-                    result = self._merge_cart_adapter_result(base_result, adapter_result)
-                    adapter_item = adapter_item_by_id.get(item_id, {})
-                    if cart_items and result.get("purchase_status") in ("success", "skipped"):
-                        backfilled = self._apply_cart_backfill_to_result(result, adapter_item, cart_items, adapter_result)
-                        self._append_purchase_trace(
-                            trace_path,
-                            f"CART_BACKFILL row={adapter_result.get('rowNumber', '')} "
-                            f"item_id={item_id} matched={backfilled.get('matched', False)} "
-                            f"score={backfilled.get('score', '')} "
-                            f"wholesale_id={backfilled.get('wholesaleId', '')} "
-                            f"supplier={backfilled.get('supplier', '')} "
-                            f"reason={backfilled.get('reason', '')}",
-                            progress_callback
-                        )
-                    self._save_purchase_result(item_id, result)
-                    status = result.get("purchase_status", "failed")
-                    summary[status if status in summary else "failed"] += 1
-                    self._append_purchase_trace(
+                        return summary, logs, ""
+
+                if use_cart_adapter and successful_cart_results:
+                    self._reconcile_successful_cart_results(
+                        batch_id,
+                        successful_cart_results,
                         trace_path,
-                        f"WRITE_RESULT row={adapter_result.get('rowNumber', '')} item_id={item_id} "
-                        f"wholesale_id={adapter_result.get('wholesaleId', '')} status={status} "
-                        f"actual_ysb_code={result.get('actual_ysb_code', '')} "
-                        f"verified_amount={adapter_result.get('verifiedAmount', '')} "
-                        f"match_source={adapter_result.get('matchSource', '')} "
-                        f"match_score={adapter_result.get('matchScore', '')} "
-                        f"match_reason={adapter_result.get('matchReason', '')} "
-                        f"reason={result.get('purchase_reason', '')}",
-                        progress_callback
+                        progress_callback,
                     )
-                    logs.append(
-                        f"第{adapter_result.get('rowNumber', '')}行 {adapter_result.get('name', '')}: "
-                        f"{self._status_text(status)} - {result.get('purchase_reason', '')}"
-                    )
+            
+            # 增强执行完成弹窗增加失败原因 Top 3（方案要求：统计失败原因分类，弹窗展示失败原因 Top 3 分类摘要）
+            if summary.get("failed", 0) > 0:
+                failure_reason_summary = self._get_failure_reason_summary(batch_id)
+                if failure_reason_summary:
+                    top3_message = "失败原因 Top 3 分类摘要：\n"
+                    for index, (reason_type, count) in enumerate(failure_reason_summary[:3], start=1):
+                        top3_message += f"{index}. {reason_type}：{count} 次\n"
+                    logs.append(top3_message)
+                    self._append_purchase_trace(trace_path, f"FAILURE_TOP3 {top3_message.strip()}", progress_callback)
+                    if progress_callback:
+                        progress_callback(top3_message.strip())
             
             self._append_purchase_trace(trace_path, f"FINISH summary={json.dumps(summary, ensure_ascii=False)}", progress_callback)
             return summary, logs, ""
@@ -858,7 +935,11 @@ class SmartPurchaseService:
                 return {}, [], "采购批次不存在"
             
             trace_path = self._create_purchase_trace_path(batch_id)
-            removed_extra = self._clear_purchase_backfill_history(batch_id, remove_cart_extra=True)
+            removed_extra = self._clear_purchase_backfill_history(
+                batch_id,
+                remove_cart_extra=True,
+                preserve_purchase_result=True,
+            )
             self._append_purchase_trace(trace_path, f"CART_BACKFILL_CLEAR removed_extra={removed_extra}", progress_callback)
             
             items = self._get_executable_items(batch_id, retry_failed=False, max_rows=0)
@@ -868,14 +949,37 @@ class SmartPurchaseService:
                 return summary, ["当前批次没有可反写的明细"], ""
 
             self._append_purchase_trace(trace_path, f"CART_BACKFILL_ONLY_START batch={batch_id} total={len(items)}", progress_callback)
-            cart_items = self._run_cart_snapshot(batch_id, trace_path, progress_callback)
+            
+            # 三期整改：获取批次的规则集和快照ID
+            resolved_rule_set_code = self._rule_selection_service.get_batch_rule_set_code(batch_id) or "default_v1"
+            conn = self.db.get_connection()
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT rule_snapshot_id FROM smart_purchase_batches WHERE batch_id = ?",
+                (batch_id,)
+            )
+            batch_row = cursor.fetchone()
+            rule_snapshot_id = batch_row["rule_snapshot_id"] if batch_row and batch_row["rule_snapshot_id"] else ""
+            
+            # 生成统一的 snapshot_batch_id（方案要求：确保购物车快照和反写匹配使用相同的 snapshot_batch_id）
+            snapshot_batch_id = f"snapshot_{batch_id}_{datetime.now().strftime('%Y%m%d%H%M%S')}"
+            
+            cart_items = self._run_cart_snapshot(batch_id, trace_path, progress_callback, snapshot_batch_id)
             if not cart_items:
+                for item in items:
+                    self._save_cart_writeback_state(
+                        item["item_id"],
+                        "NOT_FOUND",
+                        "未读取到购物车商品",
+                    )
                 return summary, ["未读取到购物车商品，请确认药师帮购物车页面已登录并打开"], ""
-            self._append_purchase_trace(trace_path, f"CART_BACKFILL_ONLY_SNAPSHOT count={len(cart_items)}", progress_callback)
+            self._append_purchase_trace(trace_path, f"CART_BACKFILL_ONLY_SNAPSHOT count={len(cart_items)} snapshot_batch_id={snapshot_batch_id}", progress_callback)
 
             matched_cart_keys = set()
             for item in items:
                 adapter_item = self._build_cart_adapter_item(item, {"max_allowed_price": ""}, [])
+                # 保留之前的采购原因，避免清除未成功下单的原因
+                previous_reason = item.get("purchase_reason", "")
                 result = {
                     "purchase_status": "success",
                     "purchase_supplier": "",
@@ -886,10 +990,15 @@ class SmartPurchaseService:
                     "purchase_quantity_result": "",
                     "purchase_price": "",
                     "max_allowed_price": "",
-                    "purchase_reason": "购物车反写",
+                    "purchase_reason": previous_reason,
                     "actual_ysb_code": item.get("ysb_code") or "",
                     "candidate_count": 1,
                     "executed_at": datetime.now().isoformat(),
+                    "cart_write_status": "NOT_STARTED",
+                    "cart_write_time": "",
+                    "cart_write_message": "",
+                    "cart_item_id": "",
+                    "cart_write_attempts": 0,
                 }
                 adapter_result = {
                     "candidateSupplier": item.get("smart_supplier") or item.get("smart_supplier_full") or "",
@@ -899,12 +1008,21 @@ class SmartPurchaseService:
                     adapter_item,
                     cart_items,
                     adapter_result,
-                    excluded_cart_keys=matched_cart_keys
+                    excluded_cart_keys=matched_cart_keys,
+                    batch_id=batch_id,
+                    purchase_detail_id=item.get("item_id") or "",
+                    snapshot_batch_id=snapshot_batch_id  # 使用统一的 snapshot_batch_id
                 )
                 if backfilled.get("matched"):
                     cart_key = backfilled.get("cartKey", "")
                     if cart_key and cart_key in matched_cart_keys:
                         summary["unmatched"] += 1
+                        self._save_cart_writeback_state(
+                            item["item_id"],
+                            "SKIPPED",
+                            "购物车商品已匹配其他采购明细，未重复反写",
+                            backfilled.get("wholesaleId", ""),
+                        )
                         logs.append(f"第{item.get('row_number')}行 {item.get('source_name')}: 购物车商品已匹配其他行，未重复反写")
                         self._append_purchase_trace(
                             trace_path,
@@ -913,7 +1031,14 @@ class SmartPurchaseService:
                             progress_callback
                         )
                         continue
-                    self._save_purchase_result(item["item_id"], result)
+                    self._save_purchase_result(
+                        item["item_id"],
+                        result,
+                        batch_id=batch_id,
+                        rule_snapshot_id=rule_snapshot_id,
+                        rule_set_code=resolved_rule_set_code,
+                        preserve_purchase_reason=True,
+                    )
                     if cart_key:
                         matched_cart_keys.add(cart_key)
                     summary["updated"] += 1
@@ -923,6 +1048,12 @@ class SmartPurchaseService:
                     )
                 else:
                     summary["unmatched"] += 1
+                    self._save_cart_writeback_state(
+                        item["item_id"],
+                        result.get("cart_write_status", "NOT_FOUND"),
+                        result.get("cart_write_message", "购物车未匹配到"),
+                        result.get("cart_item_id", ""),
+                    )
                     logs.append(f"第{item.get('row_number')}行 {item.get('source_name')}: 购物车未匹配到")
                 self._append_purchase_trace(
                     trace_path,
@@ -958,57 +1089,8 @@ class SmartPurchaseService:
             logging.error(f"购物车反写失败: {e}")
             return {}, [], str(e)
 
-    def _prepare_cart_purchase_item(self, item: Dict, supplier_scope: List[str]) -> Dict:
-        item = {key: ("" if value is None else value) for key, value in item.items()}
-        now = datetime.now().isoformat()
-        result = {
-            "purchase_status": "failed",
-            "purchase_supplier": item.get("smart_supplier") or item.get("smart_supplier_full") or "",
-            "purchase_product": item.get("smart_name") or item.get("source_name") or "",
-            "purchase_spec": item.get("smart_spec") or item.get("source_spec") or "",
-            "purchase_maker": item.get("source_maker") or "",
-            "purchase_valid_date": "",
-            "purchase_quantity_result": item.get("actual_purchase_quantity") or item.get("purchase_quantity") or "",
-            "purchase_price": item.get("smart_price") or "",
-            "max_allowed_price": "",
-            "purchase_reason": "",
-            "actual_ysb_code": item.get("actual_ysb_code") or "",
-            "candidate_count": 1 if (item.get("ysb_code") or item.get("smart_name")) else 0,
-            "executed_at": now,
-            "ready_for_cart": False,
-        }
-        
-        error = self._validate_purchase_item(item)
-        if error:
-            result["purchase_reason"] = error
-            return result
-        
-        if not str(item.get("ysb_code") or "").strip():
-            result["purchase_reason"] = "缺少药师帮编码，请先完成药师帮商品匹配"
-            return result
-        
-        supplier_error = self._validate_supplier_scope(item, supplier_scope)
-        if supplier_error:
-            result["purchase_reason"] = supplier_error
-            return result
-        
-        price_error, max_allowed_price = self._validate_price(item)
-        result["max_allowed_price"] = str(max_allowed_price) if max_allowed_price is not None else ""
-        if price_error:
-            result["purchase_reason"] = price_error
-            return result
-        
-        quantity_error = self._validate_min_quantity_and_stock(item)
-        if quantity_error:
-            result["purchase_reason"] = quantity_error
-            return result
-        
-        result["purchase_status"] = "pending"
-        result["purchase_reason"] = "已通过规则校验，等待药师帮购物车加购"
-        result["ready_for_cart"] = True
-        return result
-    
-    def _build_cart_adapter_item(self, item: Dict, base_result: Dict, supplier_scope: List[str] = None) -> Dict:
+    def _build_cart_adapter_item(self, item: Dict, base_result: Dict, supplier_scope: List[str] = None,
+                                     rule_config: Dict = None, rule_snapshot_id: str = "") -> Dict:
         quantity = item.get("actual_purchase_quantity") or item.get("purchase_quantity") or "0"
         source_name = str(item.get("source_name") or "").strip()
         source_spec = str(item.get("source_spec") or "").strip()
@@ -1037,6 +1119,8 @@ class SmartPurchaseService:
             "expectedPrice": item.get("expected_price") or "",
             "maxAllowedPrice": base_result.get("max_allowed_price", ""),
             "supplierScope": supplier_scope or [],
+            "ruleConfig": rule_config or {},
+            "ruleSnapshotId": rule_snapshot_id or "",
         }
     
     def _create_purchase_trace_path(self, batch_id: str) -> str:
@@ -1057,6 +1141,532 @@ class SmartPurchaseService:
         except Exception as e:
             logging.warning(f"写入智能采购日志失败: {e}")
     
+    def _save_single_candidate_score(
+        self,
+        cursor,
+        batch_id: str,
+        item: Dict,
+        candidate_data: Dict,
+        adapter_item: Dict,
+        purchase_status: str,
+        candidate_rank: int,
+        is_selected: bool,
+        rule_snapshot_id: str = ""
+    ) -> None:
+        """保存单个候选的评分记录"""
+        # 获取候选商品信息
+        candidate_name = candidate_data.get("name") or ""
+        candidate_spec = candidate_data.get("spec") or ""
+        candidate_maker = candidate_data.get("manufacturer") or ""
+        candidate_supplier = candidate_data.get("supplier") or ""
+        candidate_supplier_full = candidate_data.get("supplierFull") or ""
+        candidate_min_amount = candidate_data.get("minAmount") or ""
+        candidate_stock = candidate_data.get("stock") or ""
+        candidate_price = self._to_decimal(candidate_data.get("price") or 0)
+        
+        # 获取评分详情
+        match_detail = candidate_data.get("detail") or {}
+        match_score = candidate_data.get("score") or 0
+        
+        # 计算折算比较价
+        compare_price = candidate_price * Decimal("0.97") if candidate_price else None
+        
+        # 获取最高允许价
+        max_allowed_price = self._to_decimal(adapter_item.get("max_allowed_price") or 0)
+        
+        # 获取评分详情中的各项分数
+        name_score = match_detail.get("nameScore") or 0
+        spec_score = match_detail.get("specScore") or 0
+        maker_score = match_detail.get("makerScore") or 0
+        total_score = match_score
+        
+        # 获取各项是否通过的标志（优先读取完整评估字段，字段缺失时保持为空字符串）
+        identity_pass = 1 if match_detail.get("identityOk") is True else (0 if match_detail.get("identityOk") is False else "")
+        spec_conflict = 1 if match_detail.get("specConflict") is True else (0 if match_detail.get("specConflict") is False else "")
+        spec_pass = 1 if candidate_data.get("specOk") is True else (0 if candidate_data.get("specOk") is False else "")
+        maker_pass = 1 if candidate_data.get("manufacturerOk") is True else (0 if candidate_data.get("manufacturerOk") is False else "")
+        supplier_pass = 1 if candidate_data.get("supplierOk") is True else (0 if candidate_data.get("supplierOk") is False else "")
+        price_pass = 1 if candidate_data.get("priceOk") is True else (0 if candidate_data.get("priceOk") is False else "")
+        qty_pass = 1 if candidate_data.get("qtyOk") is True else (0 if candidate_data.get("qtyOk") is False else "")
+        stock_pass = 1 if candidate_data.get("stockOk") is True else (0 if candidate_data.get("stockOk") is False else "")
+        
+        # 判断最终是否合格（基于purchase_status和是否选中）
+        final_pass = 1 if (purchase_status == "success" and is_selected) else 0
+        
+        # 判断是否最终选中
+        selected = 1 if is_selected else 0
+        
+        # 获取搜索关键词
+        search_keyword = adapter_item.get("name") or ""
+        
+        # 获取候选起购数量和库存
+        min_purchase_quantity = str(candidate_min_amount) if candidate_min_amount else ""
+        candidate_stock_str = str(candidate_stock) if candidate_stock else ""
+        
+        # 获取候选供应商全称
+        candidate_supplier_full_str = str(candidate_supplier_full) if candidate_supplier_full else ""
+        
+        # 获取规则集代码（三期整改：从批次获取实际规则集）
+        rule_set_code = self._rule_selection_service.get_batch_rule_set_code(batch_id) or "default_v1"
+        
+        # 获取拒绝原因
+        reject_reason = candidate_data.get("reason") or ""
+        
+        # 获取候选原始数据
+        raw_data = json.dumps(candidate_data, ensure_ascii=False, default=str)
+        
+        # 插入purchase_candidate_scores表
+        cursor.execute('''
+            INSERT INTO purchase_candidate_scores (
+                purchase_batch_id,
+                purchase_detail_id,
+                purchase_status,
+                rule_set_code,
+                search_keyword,
+                candidate_rank,
+                candidate_name,
+                candidate_spec,
+                candidate_maker,
+                candidate_supplier,
+                candidate_supplier_full,
+                candidate_price,
+                compare_price,
+                max_allowed_price,
+                min_purchase_quantity,
+                candidate_stock,
+                name_score,
+                spec_score,
+                maker_score,
+                total_score,
+                identity_pass,
+                spec_conflict,
+                spec_pass,
+                maker_pass,
+                supplier_pass,
+                price_pass,
+                qty_pass,
+                stock_pass,
+                final_pass,
+                selected,
+                reject_reason,
+                raw_data,
+                rule_snapshot_id,
+                created_at,
+                updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (
+            batch_id,
+            item.get("itemId") or "",
+            purchase_status,
+            rule_set_code,
+            search_keyword,
+            candidate_rank,
+            candidate_name,
+            candidate_spec,
+            candidate_maker,
+            candidate_supplier,
+            candidate_supplier_full_str,
+            str(candidate_price) if candidate_price else "",
+            str(compare_price) if compare_price else "",
+            str(max_allowed_price) if max_allowed_price else "",
+            min_purchase_quantity,
+            candidate_stock_str,
+            name_score,
+            spec_score,
+            maker_score,
+            total_score,
+            identity_pass,
+            spec_conflict,
+            spec_pass,
+            maker_pass,
+            supplier_pass,
+            price_pass,
+            qty_pass,
+            stock_pass,
+            final_pass,
+            selected,
+            reject_reason,
+            raw_data,
+            rule_snapshot_id,
+            datetime.now().isoformat(),
+            datetime.now().isoformat()
+        ))
+        
+        # 同时插入smart_purchase_candidates表（方案要求）
+        cursor.execute('''
+            INSERT INTO smart_purchase_candidates (
+                purchase_batch_id,
+                purchase_detail_id,
+                rule_set_code,
+                search_keyword,
+                candidate_rank,
+                candidate_name,
+                candidate_spec,
+                candidate_maker,
+                candidate_supplier,
+                candidate_supplier_full,
+                candidate_price,
+                compare_price,
+                max_allowed_price,
+                min_purchase_quantity,
+                candidate_stock,
+                name_score,
+                spec_score,
+                maker_score,
+                total_score,
+                identity_pass,
+                spec_conflict,
+                spec_pass,
+                maker_pass,
+                supplier_pass,
+                price_pass,
+                qty_pass,
+                stock_pass,
+                final_pass,
+                selected,
+                reject_reason,
+                raw_data,
+                rule_snapshot_id,
+                created_at,
+                updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (
+            batch_id,
+            item.get("itemId") or "",
+            rule_set_code,
+            search_keyword,
+            candidate_rank,
+            candidate_name,
+            candidate_spec,
+            candidate_maker,
+            candidate_supplier,
+            candidate_supplier_full_str,
+            str(candidate_price) if candidate_price else "",
+            str(compare_price) if compare_price else "",
+            str(max_allowed_price) if max_allowed_price else "",
+            min_purchase_quantity,
+            candidate_stock_str,
+            name_score,
+            spec_score,
+            maker_score,
+            total_score,
+            identity_pass,
+            spec_conflict,
+            spec_pass,
+            maker_pass,
+            supplier_pass,
+            price_pass,
+            qty_pass,
+            stock_pass,
+            final_pass,
+            selected,
+            reject_reason,
+            raw_data,
+            rule_snapshot_id,
+            datetime.now().isoformat(),
+            datetime.now().isoformat()
+        ))
+    
+    def _save_candidate_scores(
+        self,
+        batch_id: str,
+        item: Dict,
+        result: Dict,
+        adapter_item: Dict,
+        rule_snapshot_id: str = ""
+    ) -> None:
+        """保存候选评分数据到数据库（一期落库）"""
+        try:
+            conn = self.db.get_connection()
+            cursor = conn.cursor()
+            
+            # 获取候选列表（前10个候选）
+            candidates = result.get("candidates") or []
+            
+            # 获取采购状态
+            purchase_status = result.get("status") or ""
+            
+            # 如果candidates字段存在，则批量保存前10个候选的评分记录
+            if candidates and len(candidates) > 0:
+                for i, candidate in enumerate(candidates):
+                    # 根据Node返回的isSelected标记判断是否选中（不再默认i==0为选中）
+                    is_selected = candidate.get("isSelected") is True
+                    
+                    # 调用_save_single_candidate_score函数保存单个候选的评分记录
+                    self._save_single_candidate_score(
+                        cursor,
+                        batch_id,
+                        item,
+                        candidate,
+                        adapter_item,
+                        purchase_status,
+                        i + 1,  # candidate_rank从1开始
+                        is_selected,
+                        rule_snapshot_id=rule_snapshot_id
+                    )
+                
+                conn.commit()
+                logging.info(f"✓ 已保存前{len(candidates)}个候选评分数据: batch_id={batch_id}, item_id={item.get('itemId')}")
+            else:
+                # 如果没有candidates字段，则保存单个候选的评分记录（兼容旧逻辑）
+                # 获取评分详情
+                match_detail = result.get("matchDetail") or {}
+                match_score = result.get("matchScore") or 0
+                
+                # 计算折算比较价
+                candidate_price = self._to_decimal(result.get("matchedPrice") or 0)
+                compare_price = candidate_price * Decimal("0.97") if candidate_price else None
+                
+                # 获取最高允许价
+                max_allowed_price = self._to_decimal(adapter_item.get("max_allowed_price") or 0)
+                
+                # 获取候选商品信息
+                candidate_name = result.get("matchedName") or ""
+                candidate_spec = result.get("matchedSpec") or ""
+                candidate_maker = result.get("matchedManufacturer") or ""
+                candidate_supplier = result.get("matchedSupplier") or ""
+                candidate_supplier_full = result.get("matchedSupplierFull") or ""
+                candidate_min_amount = result.get("matchedMinAmount") or ""
+                candidate_stock = result.get("matchedStock") or ""
+                candidate_rank = result.get("candidateRank") or 0
+                
+                # 获取评分详情中的各项分数
+                name_score = match_detail.get("nameScore") or 0
+                spec_score = match_detail.get("specScore") or 0
+                maker_score = match_detail.get("makerScore") or 0
+                total_score = match_score
+                
+                # 获取各项是否通过的标志（优先读取完整评估字段，字段缺失时保持为空字符串）
+                # 如果match_detail中包含字段，则使用该字段的值；如果不包含，则保持为空字符串
+                identity_pass = 1 if match_detail.get("identityOk") is True else (0 if match_detail.get("identityOk") is False else "")
+                spec_conflict = 1 if match_detail.get("specConflict") is True else (0 if match_detail.get("specConflict") is False else "")
+                spec_pass = 1 if match_detail.get("specOk") is True else (0 if match_detail.get("specOk") is False else "")
+                maker_pass = 1 if match_detail.get("manufacturerOk") is True else (0 if match_detail.get("manufacturerOk") is False else "")
+                supplier_pass = 1 if match_detail.get("supplierOk") is True else (0 if match_detail.get("supplierOk") is False else "")
+                price_pass = 1 if match_detail.get("priceOk") is True else (0 if match_detail.get("priceOk") is False else "")
+                qty_pass = 1 if match_detail.get("qtyOk") is True else (0 if match_detail.get("qtyOk") is False else "")
+                stock_pass = 1 if match_detail.get("stockOk") is True else (0 if match_detail.get("stockOk") is False else "")
+                
+                # 判断最终是否合格（基于purchase_status）
+                # 如果purchase_status=success，则final_pass=1；否则final_pass=0
+                final_pass = 1 if purchase_status == "success" else 0
+                
+                # 判断是否最终选中（基于final_pass）
+                # 如果final_pass=1，则selected=1；如果final_pass=0，则selected=0
+                selected = final_pass
+                
+                # 获取搜索关键词
+                search_keyword = adapter_item.get("name") or ""
+                
+                # 获取候选起购数量和库存
+                min_purchase_quantity = str(candidate_min_amount) if candidate_min_amount else ""
+                candidate_stock_str = str(candidate_stock) if candidate_stock else ""
+                
+                # 获取候选供应商全称
+                candidate_supplier_full_str = str(candidate_supplier_full) if candidate_supplier_full else ""
+                
+                # 获取候选原始顺序
+                candidate_rank_int = int(candidate_rank) if candidate_rank else 0
+                
+                # 获取规则集代码（三期整改：从批次获取实际规则集）
+                rule_set_code = self._rule_selection_service.get_batch_rule_set_code(batch_id) or "default_v1"
+                
+                # 获取拒绝原因
+                reject_reason = match_detail.get("rejectReason") or ""
+                
+                # 获取候选原始数据
+                raw_data = json.dumps(result, ensure_ascii=False)
+                
+                # 插入数据库
+                cursor.execute('''
+                    INSERT INTO purchase_candidate_scores (
+                        purchase_batch_id,
+                        purchase_detail_id,
+                        purchase_status,
+                        rule_set_code,
+                        search_keyword,
+                        candidate_rank,
+                        candidate_name,
+                        candidate_spec,
+                        candidate_maker,
+                        candidate_supplier,
+                        candidate_supplier_full,
+                        candidate_price,
+                        compare_price,
+                        max_allowed_price,
+                        min_purchase_quantity,
+                        candidate_stock,
+                        name_score,
+                        spec_score,
+                        maker_score,
+                        total_score,
+                        identity_pass,
+                        spec_conflict,
+                        spec_pass,
+                        maker_pass,
+                        supplier_pass,
+                        price_pass,
+                        qty_pass,
+                        stock_pass,
+                        final_pass,
+                        selected,
+                        reject_reason,
+                        raw_data,
+                        rule_snapshot_id,
+                        created_at,
+                        updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (
+                    batch_id,
+                    item.get("itemId") or "",
+                    purchase_status,
+                    rule_set_code,
+                    search_keyword,
+                    candidate_rank_int,
+                    candidate_name,
+                    candidate_spec,
+                    candidate_maker,
+                    candidate_supplier,
+                    candidate_supplier_full,
+                    str(candidate_price) if candidate_price else "",
+                    str(compare_price) if compare_price else "",
+                    str(max_allowed_price) if max_allowed_price else "",
+                    min_purchase_quantity,
+                    candidate_stock_str,
+                    name_score,
+                    spec_score,
+                    maker_score,
+                    total_score,
+                    identity_pass,
+                    spec_conflict,
+                    spec_pass,
+                    maker_pass,
+                    supplier_pass,
+                    price_pass,
+                    qty_pass,
+                    stock_pass,
+                    final_pass,
+                    selected,
+                    reject_reason,
+                    raw_data,
+                    rule_snapshot_id,
+                    datetime.now().isoformat(),
+                    datetime.now().isoformat()
+                ))
+                
+                # P2-1整改：同步写入smart_purchase_candidates表，保持双表一致
+                # 双表写入放在同一事务中，任一表失败时整体回滚
+                cursor.execute('''
+                    INSERT INTO smart_purchase_candidates (
+                        purchase_batch_id,
+                        purchase_detail_id,
+                        rule_set_code,
+                        search_keyword,
+                        candidate_rank,
+                        candidate_name,
+                        candidate_spec,
+                        candidate_maker,
+                        candidate_supplier,
+                        candidate_supplier_full,
+                        candidate_price,
+                        compare_price,
+                        max_allowed_price,
+                        min_purchase_quantity,
+                        candidate_stock,
+                        name_score,
+                        spec_score,
+                        maker_score,
+                        total_score,
+                        identity_pass,
+                        spec_conflict,
+                        spec_pass,
+                        maker_pass,
+                        supplier_pass,
+                        price_pass,
+                        qty_pass,
+                        stock_pass,
+                        final_pass,
+                        selected,
+                        reject_reason,
+                        raw_data,
+                        rule_snapshot_id,
+                        created_at,
+                        updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (
+                    batch_id,
+                    item.get("itemId") or "",
+                    rule_set_code,
+                    search_keyword,
+                    candidate_rank_int,
+                    candidate_name,
+                    candidate_spec,
+                    candidate_maker,
+                    candidate_supplier,
+                    candidate_supplier_full_str,
+                    str(candidate_price) if candidate_price else "",
+                    str(compare_price) if compare_price else "",
+                    str(max_allowed_price) if max_allowed_price else "",
+                    min_purchase_quantity,
+                    candidate_stock_str,
+                    name_score,
+                    spec_score,
+                    maker_score,
+                    total_score,
+                    identity_pass,
+                    spec_conflict,
+                    spec_pass,
+                    maker_pass,
+                    supplier_pass,
+                    price_pass,
+                    qty_pass,
+                    stock_pass,
+                    final_pass,
+                    selected,
+                    reject_reason,
+                    raw_data,
+                    rule_snapshot_id,
+                    datetime.now().isoformat(),
+                    datetime.now().isoformat()
+                ))
+                
+                # 双表统一提交，确保事务一致性
+                conn.commit()
+                logging.info(f"✓ 已保存候选评分数据（双表一致）: batch_id={batch_id}, item_id={item.get('itemId')}, score={total_score}")
+            
+        except Exception as e:
+            logging.warning(f"保存候选评分数据失败: {e}")
+            try:
+                conn.rollback()
+            except:
+                pass
+    
+    def _check_cart_adapter_syntax(self) -> str:
+        """Return a concise error when the Node adapter cannot be parsed."""
+        node_bin = os.environ.get("NODE_EXE") or shutil.which("node")
+        if not node_bin:
+            return "未找到 Node.js，无法启动购物车执行器"
+        script_path = Path(__file__).resolve().parents[1] / "automation" / "ysbang_cart_add_onebyone.mjs"
+        if not script_path.exists():
+            return f"购物车执行脚本不存在: {script_path}"
+        try:
+            completed = subprocess.run(
+                [node_bin, "--check", str(script_path)],
+                cwd=str(Path(__file__).resolve().parents[2]),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=30,
+            )
+        except Exception as error:
+            return f"购物车执行脚本语法检查异常: {error}"
+        if completed.returncode == 0:
+            return ""
+        detail = (completed.stderr or completed.stdout or "Node syntax check failed").strip()
+        return detail[:2000]
+
     def _run_cart_adapter_batch(
         self,
         batch_id: str,
@@ -1080,7 +1690,12 @@ class SmartPurchaseService:
         input_path = temp_dir / f"{batch_id}_cart_input.json"
         output_path = temp_dir / f"{batch_id}_cart_result.json"
         input_path.write_text(
-            json.dumps({"items": adapter_items, "logPath": trace_path}, ensure_ascii=False, indent=2),
+            json.dumps({
+                "items": adapter_items,
+                "logPath": trace_path,
+                "ruleConfig": adapter_items[0].get("ruleConfig", {}) if adapter_items else {},
+                "ruleSnapshotId": adapter_items[0].get("ruleSnapshotId", "") if adapter_items else "",
+            }, ensure_ascii=False, indent=2),
             encoding="utf-8"
         )
         if output_path.exists():
@@ -1151,6 +1766,32 @@ class SmartPurchaseService:
                 results = payload.get("results", [])
                 if results:
                     self._append_purchase_trace(trace_path, f"CART_ADAPTER_RESULTS count={len(results)}", progress_callback)
+                    
+                    # 保存候选评分数据到数据库（一期落库）
+                    for result in results:
+                        # 找到对应的adapter_item
+                        adapter_item = None
+                        for item in adapter_items:
+                            if item.get("itemId") == result.get("itemId"):
+                                adapter_item = item
+                                break
+                        
+                        if adapter_item:
+                            # 构造item字典（用于保存）
+                            item_dict = {
+                                "itemId": result.get("itemId"),
+                                "rowNumber": result.get("rowNumber"),
+                                "name": adapter_item.get("name"),
+                                "spec": adapter_item.get("spec"),
+                                "manufacturer": adapter_item.get("manufacturer"),
+                                "amount": adapter_item.get("amount"),
+                            }
+                            
+                            # 保存候选评分数据
+                            # 从adapter_item获取ruleSnapshotId
+                            rs_id = adapter_item.get("ruleSnapshotId", "")
+                            self._save_candidate_scores(batch_id, item_dict, result, adapter_item, rule_snapshot_id=rs_id)
+                    
                     return self._complete_missing_adapter_results(
                         adapter_items,
                         results,
@@ -1167,7 +1808,8 @@ class SmartPurchaseService:
         self,
         batch_id: str,
         trace_path: str = "",
-        progress_callback: Callable[[str], None] = None
+        progress_callback: Callable[[str], None] = None,
+        snapshot_batch_id: str = ""
     ) -> List[Dict]:
         node_bin = os.environ.get("NODE_EXE") or shutil.which("node")
         if not node_bin:
@@ -1209,10 +1851,104 @@ class SmartPurchaseService:
                 return []
             payload = json.loads(output_path.read_text(encoding="utf-8"))
             items = payload.get("items", [])
-            return items if isinstance(items, list) else []
+            cart_items = items if isinstance(items, list) else []
+            
+            # 保存购物车快照到数据库（方案要求）
+            # 使用传入的 snapshot_batch_id，确保与反写匹配使用相同的 snapshot_batch_id
+            if snapshot_batch_id:
+                self._save_cart_snapshot(batch_id, cart_items, snapshot_batch_id)
+            else:
+                # 如果没有传入 snapshot_batch_id，则生成一个新的
+                self._save_cart_snapshot(batch_id, cart_items)
+            
+            return cart_items
         except Exception as e:
             self._append_purchase_trace(trace_path, f"CART_SNAPSHOT_EXCEPTION {e}", progress_callback)
             return []
+    
+    def _save_cart_snapshot(self, batch_id: str, cart_items: List[Dict], snapshot_batch_id: str = "") -> None:
+        """保存购物车快照到数据库（方案要求）"""
+        try:
+            conn = self.db.get_connection()
+            cursor = conn.cursor()
+            
+            # 使用传入的 snapshot_batch_id，或生成一个新的
+            if not snapshot_batch_id:
+                snapshot_batch_id = f"snapshot_{batch_id}_{datetime.now().strftime('%Y%m%d%H%M%S')}"
+            
+            # 确定快照状态
+            snapshot_status = "empty" if len(cart_items) == 0 else "completed"
+            
+            # 插入购物车快照批次记录
+            cursor.execute('''
+                INSERT INTO smart_cart_snapshots (
+                    snapshot_batch_id,
+                    snapshot_type,
+                    total_items,
+                    matched_items,
+                    unmatched_items,
+                    snapshot_status,
+                    snapshot_time,
+                    created_by,
+                    created_at,
+                    updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                snapshot_batch_id,
+                "cart_backfill",  # 快照类型：购物车反写
+                len(cart_items),  # 总商品数
+                0,  # 匹配商品数（初始为0，后续更新）
+                len(cart_items),  # 未匹配商品数（初始为总商品数）
+                snapshot_status,  # 快照状态
+                datetime.now().isoformat(),  # 快照时间
+                "system",  # 创建人
+                datetime.now().isoformat(),  # 创建时间
+                datetime.now().isoformat()  # 更新时间
+            ))
+            
+            # 插入购物车快照明细记录
+            for i, cart_item in enumerate(cart_items):
+                cursor.execute('''
+                    INSERT INTO smart_cart_snapshot_items (
+                        snapshot_batch_id,
+                        item_index,
+                        item_name,
+                        item_spec,
+                        item_maker,
+                        item_supplier,
+                        item_price,
+                        item_quantity,
+                        item_stock,
+                        match_status,
+                        match_detail,
+                        created_at,
+                        updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (
+                    snapshot_batch_id,
+                    i + 1,  # 商品索引从1开始
+                    cart_item.get("name") or "",
+                    cart_item.get("spec") or "",
+                    cart_item.get("manufacturer") or "",
+                    cart_item.get("supplier") or "",
+                    cart_item.get("price") or "",
+                    cart_item.get("quantity") or "",
+                    cart_item.get("stock") or "",
+                    "pending",  # 匹配状态（初始为pending）
+                    json.dumps(cart_item, ensure_ascii=False, default=str),  # 匹配详情（原始购物车商品数据）
+                    datetime.now().isoformat(),  # 创建时间
+                    datetime.now().isoformat()  # 更新时间
+                ))
+            
+            conn.commit()
+            logging.info(f"✓ 已保存购物车快照: snapshot_batch_id={snapshot_batch_id}, total_items={len(cart_items)}, status={snapshot_status}")
+            
+        except Exception as e:
+            logging.warning(f"保存购物车快照失败: {e}")
+            try:
+                conn.rollback()
+            except:
+                pass
 
     def _cart_text(self, value) -> str:
         return "" if value is None else str(value).strip()
@@ -1302,23 +2038,6 @@ class SmartPurchaseService:
                 ):
                     return True
         return False
-
-    def _cart_spec_parts(self, value) -> Tuple[str, int]:
-        text = self._cart_text(value).lower().replace("×", "*").replace("x", "*")
-        strength = ""
-        strength_match = re.search(r"(\d+(?:\.\d+)?\s*(?:mg|g|ml|ug|μg|iu|%))", text, re.I)
-        if strength_match:
-            strength = self._cart_spec_unit_value(strength_match.group(1))
-        numbers = [
-            int(float(match.group(1)))
-            for match in re.finditer(r"(?<![a-z0-9])(\d+(?:\.\d+)?)(?!\d)\s*(片|粒|袋|板|支|瓶|贴|枚|丸|包|s)", text, re.I)
-        ]
-        total = 0
-        if numbers:
-            total = 1
-            for number in numbers:
-                total *= number
-        return strength, total
 
     def _cart_package_total_conflict(self, source, target) -> bool:
         source_strength, source_total = self._cart_spec_parts(source)
@@ -1518,12 +2237,38 @@ class SmartPurchaseService:
         adapter_item: Dict,
         cart_items: List[Dict],
         adapter_result: Dict = None,
-        excluded_cart_keys: set = None
+        excluded_cart_keys: set = None,
+        batch_id: str = "",
+        purchase_detail_id: str = "",
+        snapshot_batch_id: str = ""
     ) -> Dict:
         adapter_result = adapter_result or {}
         cart_item, score, reason = self._find_cart_backfill_item(adapter_item, result, cart_items, excluded_cart_keys)
+        
+        # 保存购物车反写匹配过程到数据库（方案要求）
+        match_status = "matched" if cart_item else "unmatched"
+        match_detail = {
+            "score": score,
+            "reason": reason,
+            "adapter_item": adapter_item,
+            "cart_item": cart_item if cart_item else {},
+            "excluded_cart_keys": list(excluded_cart_keys) if excluded_cart_keys else [],
+        }
+        self._save_cart_backfill_match(
+            batch_id,
+            purchase_detail_id,
+            match_status,
+            reason,  # match_type: wholesaleId或name_spec_manufacturer
+            score,
+            match_detail,
+            snapshot_batch_id,  # 使用传入的 snapshot_batch_id，确保与购物车快照使用相同的 snapshot_batch_id
+            rule_snapshot_id=adapter_item.get("ruleSnapshotId", "")  # 二期整改：关联规则快照
+        )
+        
         if not cart_item:
-            result["purchase_reason"] = f"{result.get('purchase_reason', '')}; cart backfill not matched".strip("; ")
+            result["cart_write_status"] = "NOT_FOUND"
+            result["cart_write_time"] = datetime.now().isoformat()
+            result["cart_write_message"] = f"购物车未匹配，匹配方式={reason}，分数={score}"
             return {"matched": False, "score": score, "reason": reason}
         result["actual_ysb_code"] = self._cart_text(cart_item.get("wholesaleId")) or result.get("actual_ysb_code", "")
         result["purchase_product"] = self._cart_text(cart_item.get("name") or cart_item.get("drugName"))
@@ -1541,7 +2286,11 @@ class SmartPurchaseService:
         result["actual_purchase_quantity"] = quantity
         result["purchase_quantity"] = quantity
         result["sync_purchase_quantity"] = True
-        result["purchase_reason"] = f"{result.get('purchase_reason', '')}; cart backfilled by {reason}, score {score}".strip("; ")
+        if result.get("cart_write_status") not in ("WRITTEN", "ALREADY_EXISTS"):
+            result["cart_write_status"] = "ALREADY_EXISTS"
+        result["cart_write_time"] = datetime.now().isoformat()
+        result["cart_write_message"] = f"购物车反写成功，匹配方式={reason}，分数={score}"
+        result["cart_item_id"] = result.get("actual_ysb_code", "")
         return {
             "matched": True,
             "score": score,
@@ -1550,6 +2299,141 @@ class SmartPurchaseService:
             "wholesaleId": result.get("actual_ysb_code", ""),
             "supplier": result.get("purchase_supplier", ""),
         }
+    
+    def _save_cart_backfill_match(
+        self,
+        batch_id: str,
+        purchase_detail_id: str,
+        match_status: str,
+        match_type: str,
+        match_score: int,
+        match_detail: Dict,
+        snapshot_batch_id: str = "",
+        rule_snapshot_id: str = ""
+    ) -> None:
+        """保存购物车反写匹配过程到数据库（方案要求）"""
+        try:
+            conn = self.db.get_connection()
+            cursor = conn.cursor()
+            
+            # 使用传入的 snapshot_batch_id，或生成一个新的
+            if not snapshot_batch_id:
+                snapshot_batch_id = f"snapshot_{batch_id}_{datetime.now().strftime('%Y%m%d%H%M%S')}"
+            
+            # 插入购物车反写匹配记录
+            cursor.execute('''
+                INSERT INTO smart_cart_backfill_matches (
+                    snapshot_batch_id,
+                    snapshot_item_id,
+                    purchase_batch_id,
+                    purchase_detail_id,
+                    match_type,
+                    match_score,
+                    match_status,
+                    match_detail,
+                    rule_snapshot_id,
+                    created_at,
+                    updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                snapshot_batch_id,  # 快照批次ID
+                "",  # 快照商品ID（暂时为空，后续可以关联）
+                batch_id,  # 采购批次ID
+                purchase_detail_id,  # 采购明细ID
+                match_type,  # 匹配方式：wholesaleId或name_spec_manufacturer
+                match_score,  # 匹配分数
+                match_status,  # 匹配状态：matched或unmatched
+                json.dumps(match_detail, ensure_ascii=False, default=str),  # 匹配详情（原始匹配过程数据）
+                rule_snapshot_id,  # 规则快照ID（二期整改）
+                datetime.now().isoformat(),  # 创建时间
+                datetime.now().isoformat()  # 更新时间
+            ))
+            
+            conn.commit()
+            logging.info(f"✓ 已保存购物车反写匹配: batch_id={batch_id}, detail_id={purchase_detail_id}, status={match_status}, type={match_type}, score={match_score}")
+            
+        except Exception as e:
+            logging.warning(f"保存购物车反写匹配失败: {e}")
+            try:
+                conn.rollback()
+            except:
+                pass
+
+    def _reconcile_successful_cart_results(
+        self,
+        batch_id: str,
+        successful_results: List[Tuple[str, Dict, Dict, Dict]],
+        trace_path: str,
+        progress_callback: Callable[[str], None] = None,
+    ) -> None:
+        """Run one end-of-batch snapshot without rewriting purchase result fields."""
+        snapshot_batch_id = (
+            f"snapshot_{batch_id}_final_{datetime.now().strftime('%Y%m%d%H%M%S')}"
+        )
+        cart_items = self._run_cart_snapshot(
+            batch_id,
+            trace_path,
+            progress_callback,
+            snapshot_batch_id,
+        )
+        self._append_purchase_trace(
+            trace_path,
+            f"CART_FINAL_SNAPSHOT count={len(cart_items)} "
+            f"success_count={len(successful_results)} snapshot_batch_id={snapshot_batch_id}",
+            progress_callback,
+        )
+        if not cart_items:
+            self._append_purchase_trace(
+                trace_path,
+                "CART_FINAL_RECONCILE_SKIPPED empty_snapshot; keep_node_verified_state=true",
+                progress_callback,
+            )
+            return
+
+        matched_cart_keys = set()
+        for item_id, adapter_item, adapter_result, result in successful_results:
+            cart_item, score, reason = self._find_cart_backfill_item(
+                adapter_item,
+                result,
+                cart_items,
+                excluded_cart_keys=matched_cart_keys,
+            )
+            if not cart_item:
+                self._save_cart_writeback_state(
+                    item_id,
+                    "NOT_FOUND",
+                    "批次结束复核未在购物车找到该商品；请人工确认购物车",
+                    result.get("cart_item_id", ""),
+                    int(result.get("cart_write_attempts") or 0),
+                )
+                self._append_purchase_trace(
+                    trace_path,
+                    f"CART_FINAL_RECONCILE item_id={item_id} matched=false score={score} reason={reason}",
+                    progress_callback,
+                )
+                continue
+
+            cart_key = self._cart_item_key(cart_item)
+            if cart_key:
+                matched_cart_keys.add(cart_key)
+            original_status = result.get("cart_write_status", "WRITTEN")
+            final_status = (
+                "ALREADY_EXISTS" if original_status == "ALREADY_EXISTS" else "WRITTEN"
+            )
+            cart_item_id = self._cart_text(cart_item.get("wholesaleId"))
+            self._save_cart_writeback_state(
+                item_id,
+                final_status,
+                f"批次结束购物车复核通过，匹配方式={reason}，分数={score}",
+                cart_item_id,
+                int(result.get("cart_write_attempts") or 0),
+            )
+            self._append_purchase_trace(
+                trace_path,
+                f"CART_FINAL_RECONCILE item_id={item_id} matched=true "
+                f"status={final_status} score={score} reason={reason} cart_item_id={cart_item_id}",
+                progress_callback,
+            )
 
     def _cart_extra_business_key(self, cart_item: Dict) -> str:
         source = self._cart_item_key(cart_item) or str(uuid.uuid4())
@@ -1622,12 +2506,17 @@ class SmartPurchaseService:
             self._cart_text(cart_item.get("amount")),
             self._cart_text(cart_item.get("price")),
             "",
-            "购物车反写：购物车有，采购表没有",
+            "",
             1,
             now,
             now,
             now,
             item_id,
+            "ALREADY_EXISTS",
+            now,
+            "购物车额外商品已登记",
+            self._cart_text(cart_item.get("wholesaleId")),
+            0,
         )
 
         if created:
@@ -1642,8 +2531,9 @@ class SmartPurchaseService:
                  raw_data, normalized_data, import_status, validation_message,
                  purchase_status, purchase_supplier, purchase_product, purchase_spec,
                  purchase_maker, purchase_valid_date, purchase_quantity_result, purchase_price, max_allowed_price,
-                 purchase_reason, candidate_count, executed_at, created_at, updated_at, item_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 purchase_reason, candidate_count, executed_at, created_at, updated_at, item_id,
+                 cart_write_status, cart_write_time, cart_write_message, cart_item_id, cart_write_attempts)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', values)
         else:
             cursor.execute('''
@@ -1672,8 +2562,12 @@ class SmartPurchaseService:
                     purchase_valid_date = ?,
                     purchase_quantity_result = ?,
                     purchase_price = ?,
-                    purchase_reason = ?,
                     candidate_count = 1,
+                    cart_write_status = 'ALREADY_EXISTS',
+                    cart_write_time = ?,
+                    cart_write_message = ?,
+                    cart_item_id = ?,
+                    cart_write_attempts = 0,
                     executed_at = ?,
                     updated_at = ?
                 WHERE item_id = ?
@@ -1698,7 +2592,9 @@ class SmartPurchaseService:
                 self._cart_text(cart_item.get("validDate")),
                 self._cart_text(cart_item.get("amount")),
                 self._cart_text(cart_item.get("price")),
-                "购物车反写：购物车有，采购表没有",
+                now,
+                "购物车额外商品已登记",
+                self._cart_text(cart_item.get("wholesaleId")),
                 now,
                 now,
                 item_id,
@@ -1806,18 +2702,28 @@ class SmartPurchaseService:
         progress_callback: Callable[[str], None] = None,
         web_error_callback: Callable[[str], bool] = None,
         stop_callback: Callable[[], bool] = None
-    ) -> List[Dict]:
+    ) -> Tuple[List[Dict], bool, str]:
         combined = list(adapter_results or [])
+        consecutive_web_errors = 0
         while True:
             web_result = next((result for result in combined if result.get("status") == "web_error"), None)
             if not web_result:
-                return combined
+                return combined, False, ""
             message = web_result.get("reason", "药师帮网页异常，无法继续")
+            consecutive_web_errors += 1
             self._append_purchase_trace(trace_path, f"WEB_ERROR_PAUSE reason={message}", progress_callback)
+            if consecutive_web_errors >= 2:
+                circuit_reason = f"连续 {consecutive_web_errors} 次药师帮连接异常，已触发熔断：{message}"
+                self._append_purchase_trace(
+                    trace_path,
+                    f"WEB_ERROR_CIRCUIT_BREAKER count={consecutive_web_errors} reason={message}",
+                    progress_callback,
+                )
+                return combined, True, circuit_reason
             should_continue = bool(web_error_callback and web_error_callback(message))
             if not should_continue:
                 self._append_purchase_trace(trace_path, "WEB_ERROR_CANCEL user_cancelled", progress_callback)
-                return combined
+                return combined, True, f"用户取消继续执行：{message}"
             failed_item_id = web_result.get("itemId", "")
             retry_started = False
             retry_items = []
@@ -1833,10 +2739,10 @@ class SmartPurchaseService:
                     retry_items.append(item)
             if not retry_items:
                 self._append_purchase_trace(trace_path, "WEB_ERROR_RETRY no_remaining_items", progress_callback)
-                return combined
+                return combined, False, ""
             if stop_callback and stop_callback():
                 self._append_purchase_trace(trace_path, "WEB_ERROR_RETRY skipped_by_stop", progress_callback)
-                return combined
+                return combined, True, "用户请求停止"
             combined = [
                 result
                 for result in combined
@@ -1873,6 +2779,81 @@ class SmartPurchaseService:
                 counts["other"] += count
         return counts
     
+    def _get_failure_reason_summary(self, batch_id: str) -> List[Tuple[str, int]]:
+        """统计失败原因的分类和数量（方案要求：统计失败原因分类，弹窗展示失败原因 Top 3 分类摘要）"""
+        conn = self.db.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT purchase_reason, cart_write_message, cart_write_status, failure_code
+            FROM smart_purchase_items
+            WHERE batch_id = ?
+              AND purchase_status = 'failed'
+        ''', (batch_id,))
+        
+        # 统计失败原因分类
+        failure_reason_counts = {}
+        for row in cursor.fetchall():
+            cart_status = row["cart_write_status"] or ""
+            reason = row["purchase_reason"] or ""
+            if cart_status in ("FAILED_RETRYABLE", "FAILED_MANUAL"):
+                reason = row["cart_write_message"] or reason
+            reason_type = self._classify_failure_reason(reason, row["failure_code"] or "")
+            if reason_type in failure_reason_counts:
+                failure_reason_counts[reason_type] += 1
+            else:
+                failure_reason_counts[reason_type] = 1
+        
+        # 按数量排序，返回Top 3
+        sorted_reasons = sorted(failure_reason_counts.items(), key=lambda x: x[1], reverse=True)
+        return sorted_reasons
+    
+    def _classify_failure_reason(self, reason: str, failure_code: str = "") -> str:
+        """分类失败原因（根据关键词进行分类）"""
+        if failure_code in ("CDP_CONNECTION_FAILED", "EXECUTION_TIMEOUT"):
+            return "连接或执行异常"
+        if failure_code in ("LOGIN_NOT_CONFIRMED", "BROWSER_NOT_FOUND", "PAGE_CLOSED"):
+            return "浏览器或登录异常"
+        if not reason:
+            return "未知失败原因"
+        
+        # 根据关键词进行分类
+        if "未找到候选商品" in reason or "搜索无候选" in reason:
+            return "搜索无候选"
+        elif "候选匹配分数过低" in reason or "低分候选" in reason:
+            return "候选匹配分数过低"
+        elif "规格不一致" in reason or "规格不匹配" in reason:
+            return "规格不一致"
+        elif "厂家不匹配" in reason or "厂家不一致" in reason:
+            return "厂家不匹配"
+        elif "价格超限" in reason or "价格超过最高允许价" in reason:
+            return "价格超限"
+        elif "库存不足" in reason or "候选库存不足" in reason:
+            return "库存不足"
+        elif "起购不满足" in reason or "起购数量" in reason:
+            return "起购不满足"
+        elif "加购接口返回异常" in reason or "加购接口异常" in reason:
+            return "加购接口异常"
+        elif "加购后购物车数量不足" in reason or "购物车数量未达到要求" in reason:
+            return "加购后购物车数量不足"
+        elif "浏览器异常" in reason or "未找到药师帮浏览器页面" in reason:
+            return "浏览器异常"
+        elif "未确认登录" in reason or "登录状态" in reason:
+            return "登录异常"
+        elif "执行超时" in reason or "超时" in reason:
+            return "执行超时"
+        elif re.search(r"fetch failed|ECONNREFUSED|ECONNRESET|连接异常", reason, re.IGNORECASE):
+            return "连接或执行异常"
+        elif "缺少商品名称" in reason:
+            return "缺少商品名称"
+        elif "采购数量无效" in reason:
+            return "采购数量无效"
+        elif "候选供应商不在允许范围" in reason:
+            return "候选供应商不在允许范围"
+        elif "未配置供应商范围" in reason:
+            return "未配置供应商范围"
+        else:
+            return "其他失败原因"
+    
     def _merge_cart_adapter_result(self, base_result: Dict, adapter_result: Dict) -> Dict:
         result = dict(base_result)
         status = adapter_result.get("status", "failed")
@@ -1880,9 +2861,56 @@ class SmartPurchaseService:
             result["purchase_status"] = status
         else:
             result["purchase_status"] = "failed"
-        result["purchase_reason"] = adapter_result.get("reason", "") or "购物车执行器未返回原因"
-        if adapter_result.get("matchReason"):
-            result["purchase_reason"] = f"{result['purchase_reason']}；{adapter_result.get('matchReason')}"
+        # 技术执行信息使用独立字段；只有业务规则拒绝会更新采购原因。
+        adapter_reason = adapter_result.get("reason", "")
+        failure_category = adapter_result.get("failureCategory", "")
+        if not failure_category and status not in ("success", "skipped"):
+            if re.search(
+                r"fetch failed|ECONNREFUSED|ECONNRESET|timeout|网络|WebSocket|未确认登录|浏览器|页面被关闭",
+                adapter_reason,
+                re.IGNORECASE,
+            ):
+                failure_category = "TECHNICAL_RETRYABLE"
+            else:
+                failure_category = "BUSINESS_REJECTED"
+        result["failure_category"] = failure_category
+        # 搜索、评分、价格、厂家等业务拒绝属于采购原因；连接和页面异常仅写购物车信息。
+        if (
+            status not in ("success", "skipped")
+            and failure_category in ("BUSINESS_REJECTED", "NO_CANDIDATE")
+            and adapter_reason
+        ):
+            result["purchase_reason"] = adapter_reason
+        cart_write_status = adapter_result.get("cartWriteStatus", "")
+        if not cart_write_status:
+            if status == "success":
+                cart_write_status = "WRITTEN"
+            elif status == "skipped":
+                cart_write_status = "SKIPPED"
+            elif re.search(
+                r"timeout|Runtime\.evaluate|network|fetch failed|ECONNREFUSED|ECONNRESET",
+                adapter_reason,
+                re.IGNORECASE,
+            ):
+                cart_write_status = "FAILED_RETRYABLE"
+            else:
+                cart_write_status = "FAILED_MANUAL"
+        result["cart_write_status"] = cart_write_status
+        result["cart_write_time"] = adapter_result.get("cartWriteTime") or datetime.now().isoformat()
+        result["cart_write_message"] = adapter_result.get("cartWriteMessage") or adapter_reason
+        result["cart_item_id"] = adapter_result.get("cartItemId") or adapter_result.get("wholesaleId", "")
+        result["cart_write_attempts"] = int(adapter_result.get("cartWriteAttempts") or 0)
+        # 二期整改：从Node结果中提取结构化失败编码
+        if adapter_result.get("failureStage"):
+            result["failure_stage"] = adapter_result.get("failureStage")
+        if adapter_result.get("failureCode"):
+            result["failure_code"] = adapter_result.get("failureCode")
+        if adapter_result.get("failureDetail"):
+            result["failure_detail"] = adapter_result.get("failureDetail")
+        if adapter_result.get("suggestion"):
+            result["suggestion"] = adapter_result.get("suggestion")
+        if adapter_result.get("ruleSnapshotId"):
+            result["rule_snapshot_id"] = adapter_result.get("ruleSnapshotId")
         if adapter_result.get("noPurchaseInfo"):
             result["purchase_supplier"] = ""
             result["purchase_product"] = ""
@@ -1910,6 +2938,11 @@ class SmartPurchaseService:
         result["executed_at"] = datetime.now().isoformat()
         result["ready_for_cart"] = False
         return result
+
+    def _result_display_reason(self, result: Dict) -> str:
+        if result.get("failure_category", "").startswith("TECHNICAL_"):
+            return result.get("cart_write_message") or result.get("purchase_reason", "")
+        return result.get("purchase_reason") or result.get("cart_write_message", "")
     
     def _prepare_cart_purchase_item(self, item: Dict, supplier_scope: List[str]) -> Dict:
         item = {key: ("" if value is None else value) for key, value in item.items()}
@@ -1979,7 +3012,9 @@ class SmartPurchaseService:
                    smart_approval, smart_supplier, smart_supplier_full,
                    min_purchase_quantity, available_stock, actual_purchase_quantity,
                    smart_price, selected, activity_type, ysb_code, actual_ysb_code, barcode,
-                   import_status, validation_message, purchase_status
+                   import_status, validation_message, purchase_status, purchase_reason,
+                   cart_write_status, cart_write_time, cart_write_message,
+                   cart_item_id, cart_write_attempts
             FROM smart_purchase_items
             WHERE batch_id = ?
               AND import_status = 'valid'
@@ -2045,10 +3080,65 @@ class SmartPurchaseService:
         base_result["purchase_reason"] = "药师帮购物车执行适配器未接入，未执行加购"
         return base_result
     
-    def _save_purchase_result(self, item_id: str, result: Dict):
+    def _save_cart_writeback_state(
+        self,
+        item_id: str,
+        status: str,
+        message: str = "",
+        cart_item_id: str = "",
+        attempts: int = 0,
+    ) -> None:
+        """Update cart writeback metadata without touching purchase result fields."""
+        conn = self.db.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+            UPDATE smart_purchase_items
+            SET cart_write_status = ?,
+                cart_write_time = ?,
+                cart_write_message = ?,
+                cart_item_id = ?,
+                cart_write_attempts = ?,
+                updated_at = ?
+            WHERE item_id = ?
+        ''', (
+            status or "NOT_STARTED",
+            datetime.now().isoformat(),
+            message or "",
+            cart_item_id or "",
+            int(attempts or 0),
+            datetime.now().isoformat(),
+            item_id,
+        ))
+        conn.commit()
+
+    def _save_purchase_result(
+        self,
+        item_id: str,
+        result: Dict,
+        batch_id: str = "",
+        rule_snapshot_id: str = "",
+        rule_set_code: str = "",
+        preserve_purchase_reason: bool = False,
+    ):
         conn = self.db.get_connection()
         cursor = conn.cursor()
         status = result.get("purchase_status", "failed")
+
+        # 二期整改：提取结构化失败信息
+        failure_stage = result.get("failure_stage") or result.get("failureStage") or ""
+        failure_code = result.get("failure_code") or result.get("failureCode") or ""
+
+        # 如果没有结构化失败编码，从原始原因分类
+        if not failure_code and status not in ("success", "skipped"):
+            classified = self._failure_reason_service._classify_raw_reason(
+                result.get("purchase_reason", "")
+            )
+            failure_stage = classified["stage"]
+            failure_code = classified["code"]
+            # 将分类结果回写到result中
+            result["failure_stage"] = failure_stage
+            result["failure_code"] = failure_code
+
         if status in ("success", "skipped"):
             cursor.execute('''
                 UPDATE smart_purchase_items
@@ -2063,10 +3153,17 @@ class SmartPurchaseService:
                     purchase_quantity = CASE WHEN ? THEN ? ELSE purchase_quantity END,
                     purchase_price = ?,
                     max_allowed_price = ?,
-                    purchase_reason = ?,
+                    purchase_reason = CASE WHEN ? = 1 THEN purchase_reason ELSE ? END,
                     actual_ysb_code = ?,
                     candidate_count = ?,
                     executed_at = ?,
+                    failure_stage = ?,
+                    failure_code = ?,
+                    cart_write_status = ?,
+                    cart_write_time = ?,
+                    cart_write_message = ?,
+                    cart_item_id = ?,
+                    cart_write_attempts = ?,
                     updated_at = ?
                 WHERE item_id = ?
             ''', (
@@ -2082,10 +3179,18 @@ class SmartPurchaseService:
                 result.get("purchase_quantity", result.get("purchase_quantity_result", "")),
                 result.get("purchase_price", ""),
                 result.get("max_allowed_price", ""),
+                1 if preserve_purchase_reason else 0,
                 result.get("purchase_reason", ""),
                 result.get("actual_ysb_code", ""),
                 result.get("candidate_count", 0),
                 result.get("executed_at", ""),
+                failure_stage,
+                failure_code,
+                result.get("cart_write_status", "NOT_STARTED"),
+                result.get("cart_write_time", ""),
+                result.get("cart_write_message", ""),
+                result.get("cart_item_id", ""),
+                int(result.get("cart_write_attempts") or 0),
                 datetime.now().isoformat(),
                 item_id
             ))
@@ -2101,44 +3206,120 @@ class SmartPurchaseService:
                     purchase_quantity_result = '',
                     purchase_price = '',
                     actual_ysb_code = '',
-                    purchase_reason = ?,
+                    purchase_reason = CASE WHEN ? = 1 THEN purchase_reason ELSE ? END,
                     executed_at = ?,
+                    failure_stage = ?,
+                    failure_code = ?,
+                    cart_write_status = ?,
+                    cart_write_time = ?,
+                    cart_write_message = ?,
+                    cart_item_id = ?,
+                    cart_write_attempts = ?,
                     updated_at = ?
                 WHERE item_id = ?
             ''', (
                 status,
+                1 if preserve_purchase_reason else 0,
                 result.get("purchase_reason", ""),
                 result.get("executed_at", ""),
+                failure_stage,
+                failure_code,
+                result.get("cart_write_status", "NOT_STARTED"),
+                result.get("cart_write_time", ""),
+                result.get("cart_write_message", ""),
+                result.get("cart_item_id", ""),
+                int(result.get("cart_write_attempts") or 0),
                 datetime.now().isoformat(),
                 item_id
             ))
+
+        # 二期整改：保存结构化失败原因到 smart_purchase_failure_reasons 表
+        if failure_code and batch_id:
+            # 从 item_id 中提取行号（格式：batch_id_rowNumber）
+            row_number = result.get("row_number") or result.get("rowNumber") or 0
+            if not row_number:
+                try:
+                    # item_id 格式为 batch_id_rowNumber，取最后一个下划线后的数字
+                    parts = item_id.rsplit("_", 1)
+                    if len(parts) == 2 and parts[1].isdigit():
+                        row_number = int(parts[1])
+                except Exception:
+                    row_number = 0
+
+            # 优先保存 Node 返回的 failureDetail 和 suggestion
+            failure_detail = result.get("failure_detail") or result.get("failureDetail") or ""
+            suggestion = result.get("suggestion") or ""
+
+            # Node 未返回时，调用失败原因服务的分类结果生成默认详情和建议
+            if not failure_detail or not suggestion:
+                classified = self._failure_reason_service._classify_raw_reason(
+                    result.get("purchase_reason", "")
+                )
+                if not failure_detail:
+                    failure_detail = classified.get("detail", "")
+                if not suggestion:
+                    suggestion = classified.get("suggestion", "")
+
+            self._failure_reason_service.save_failure_reason(
+                batch_id=batch_id,
+                item_id=item_id,
+                row_number=row_number,
+                failure_stage=failure_stage,
+                failure_code=failure_code,
+                failure_message=result.get("purchase_reason", ""),
+                failure_detail=failure_detail,
+                suggestion=suggestion,
+                raw_reason=result.get("purchase_reason", ""),
+                rule_set_code=rule_set_code,
+                rule_snapshot_id=rule_snapshot_id
+            )
+
         conn.commit()
     
     def _validate_purchase_item(self, item: Dict) -> str:
+        """增强行级基础校验失败原因（方案要求：提示行号、商品名、失败环节、关键对比值和建议动作）"""
+        row_number = item.get("row_number", "")
+        item_name = item.get("source_name") or item.get("business_key") or ""
+        
         if not item.get("source_name"):
-            return "缺少商品名称"
-        if self._to_decimal(item.get("purchase_quantity")) <= 0:
-            return "采购数量必须大于0"
+            return f"第{row_number}行 {item_name}: 缺少商品名称。建议：请检查导入文件，确保每行都有商品名称字段。"
+        
+        purchase_quantity = self._to_decimal(item.get("purchase_quantity"))
+        if purchase_quantity <= 0:
+            return f"第{row_number}行 {item_name}: 采购数量无效（当前数量: {purchase_quantity}）。建议：请修改采购数量为大于0的数值。"
+        
         return ""
     
     def _validate_supplier_scope(self, item: Dict, supplier_scope: List[str]) -> str:
+        """增强供应商范围校验失败原因（方案要求：提示行号、候选供应商、允许范围、建议调整）"""
+        row_number = item.get("row_number", "")
+        item_name = item.get("source_name") or item.get("business_key") or ""
+        
         if not supplier_scope:
-            return "未确认本次允许采购的供应商范围"
+            return f"第{row_number}行 {item_name}: 未配置供应商范围。建议：请在批次设置中配置允许采购的供应商范围。"
         
         supplier_text = " ".join([
             item.get("smart_supplier", ""),
             item.get("smart_supplier_full", ""),
         ]).lower()
+        
         if not supplier_text.strip():
-            return "未找到候选供应商"
+            return f"第{row_number}行 {item_name}: 未找到候选供应商。建议：请先完成药师帮商品匹配，或导入包含供应商信息的采购清单。"
+        
+        candidate_supplier = item.get("smart_supplier") or item.get("smart_supplier_full") or ""
+        allowed_suppliers = ", ".join(supplier_scope)
         
         for supplier in supplier_scope:
             if supplier and supplier.lower() in supplier_text:
                 return ""
         
-        return "候选供应商不在本次允许采购范围内"
+        return f"第{row_number}行 {item_name}: 候选供应商不在允许范围（候选供应商: {candidate_supplier}，允许范围: {allowed_suppliers}）。建议：请调整供应商范围或选择其他供应商。"
     
     def _validate_price(self, item: Dict) -> Tuple[str, Decimal | None]:
+        """增强价格校验失败原因（方案要求：提示行号、商品名、期望价、最高允许价、候选价、折后比较价、建议动作）"""
+        row_number = item.get("row_number", "")
+        item_name = item.get("source_name") or item.get("business_key") or ""
+        
         expected_price = self._to_decimal(item.get("expected_price"))
         smart_price = self._to_decimal(item.get("smart_price"))
         
@@ -2151,24 +3332,32 @@ class SmartPurchaseService:
         )
         
         if smart_price <= 0:
-            return "未找到候选采购价格", max_allowed_price
+            # 增强未找到候选采购价格提示（方案要求：提示行号、商品名、建议动作）
+            return f"第{row_number}行 {item_name}: 未找到候选采购价格。建议：请先完成药师帮商品匹配，或选择有价格的候选供应商。", max_allowed_price
         
         compare_price = smart_price * Decimal("0.97")
         if compare_price > max_allowed_price:
-            return "供应商范围内候选价格超过期望价5%或1元", max_allowed_price
+            # 增强候选价格超限提示（方案要求：提示行号、商品名、期望价、最高允许价、候选价、折后比较价、建议动作）
+            return f"第{row_number}行 {item_name}: 候选价格超限（期望价: {expected_price}，最高允许价: {max_allowed_price}，候选价: {smart_price}，折后比较价: {compare_price}）。建议：请调整价格上限或选择其他供应商。", max_allowed_price
         
         return "", max_allowed_price
     
     def _validate_min_quantity_and_stock(self, item: Dict) -> str:
+        """增强起购和库存校验失败原因（方案要求：提示行号、商品名、采购数量、候选起购数量、候选库存、建议动作）"""
+        row_number = item.get("row_number", "")
+        item_name = item.get("source_name") or item.get("business_key") or ""
+        
         purchase_quantity = self._to_decimal(item.get("purchase_quantity"))
         min_purchase_quantity = self._to_decimal(item.get("min_purchase_quantity"))
         available_stock = self._to_decimal(item.get("available_stock"))
         
         if min_purchase_quantity > 0 and min_purchase_quantity > purchase_quantity:
-            return "供应商范围内候选起购数量大于采购数量"
+            # 增强候选起购数量大于采购数量提示（方案要求：提示行号、商品名、采购数量、起购数量、建议动作）
+            return f"第{row_number}行 {item_name}: 候选起购数量大于采购数量（采购数量: {purchase_quantity}，候选起购数量: {min_purchase_quantity}）。建议：请提高采购数量或选择其他供应商。"
         
         if available_stock > 0 and available_stock < purchase_quantity:
-            return "库存不足"
+            # 增强候选库存不足提示（方案要求：提示行号、商品名、采购数量、库存、建议动作）
+            return f"第{row_number}行 {item_name}: 候选库存不足（采购数量: {purchase_quantity}，候选库存: {available_stock}）。建议：请降低采购数量或选择其他供应商。"
         
         return ""
     

@@ -21,6 +21,7 @@ from app.ui.pages.log_page import LogPage
 from app.ui.pages.operation_log_page import OperationLogPage
 from app.ui.pages.db_import_page import DbImportPage
 from app.ui.pages.smart_purchase_page import SmartPurchasePage
+from app.ui.pages.rule_manage_page import RuleManagePage
 from app.ui.pages.stock_compare_page import StockComparePage
 from app.ui.pages.yys_stock_query_page import YysStockQueryPage
 from app.ui.pages.jy_stock_query_page import JyStockQueryPage
@@ -103,6 +104,7 @@ class MainWindow(QWidget):
                 "group_id": "smart_purchase_group",
                 "children": [
                     ("药师帮智能采购", "smart_purchase", "menu.smart_purchase"),
+                    ("评分规则管理", "rule_manage", "menu.smart_purchase"),
                 ],
             },
             {
@@ -237,6 +239,7 @@ class MainWindow(QWidget):
             "rpa": "RPA机器人",
             "exe_config": "EXE配置管理",
             "smart_purchase": "智能采购 / 药师帮智能采购",
+            "rule_manage": "智能采购 / 评分规则管理",
             "stock_compare": "云药店库存同步 / 库存对比",
             "yys_stock_query": "云药店库存同步 / 云药店库存查询",
             "jy_stock_query": "云药店库存同步 / 君元库存查询",
@@ -264,6 +267,7 @@ class MainWindow(QWidget):
             "rpa": "RPA机器人",
             "exe_config": "EXE配置",
             "smart_purchase": "智能采购",
+            "rule_manage": "评分规则",
             "stock_compare": "库存对比",
             "yys_stock_query": "云药店库存",
             "jy_stock_query": "君元库存",
@@ -295,6 +299,7 @@ class MainWindow(QWidget):
             "rpa": lambda: RpaRobotPage(self.db, self.user['username'], self.user.get('role_code', 'store_manager')),
             "exe_config": lambda: RpaExeConfigPage(self.db),
             "smart_purchase": lambda: SmartPurchasePage(self.db, self.user['username'], self.user.get('role_code', 'store_manager')),
+            "rule_manage": lambda: RuleManagePage(self.db, self.user['username'], self.user.get('role_code', 'store_manager')),
             "stock_compare": lambda: StockComparePage(self.db, self.user['username'], self.user.get('role_code', 'store_manager')),
             "yys_stock_query": lambda: YysStockQueryPage(self.db, self.user['username'], self.user.get('role_code', 'store_manager')),
             "jy_stock_query": lambda: JyStockQueryPage(self.db),
@@ -376,6 +381,7 @@ class MainWindow(QWidget):
             "rpa": "menu.rpa_robot",
             "exe_config": "menu.exe_config",
             "smart_purchase": "menu.smart_purchase",
+            "rule_manage": "menu.smart_purchase",
             "stock_compare": "menu.stock_compare",
             "yys_stock_query": "menu.yys_stock",
             "jy_stock_query": "menu.jy_stock",

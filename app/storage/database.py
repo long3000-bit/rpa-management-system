@@ -816,6 +816,7 @@ class Database:
                 单片价 TEXT,
                 拆零价 TEXT,
                 库存数量 TEXT,
+                三月销量 TEXT,
                 价格类型 TEXT,
                 价格更新时间 TEXT,
                 抓取状态 TEXT DEFAULT 'success',
@@ -887,6 +888,7 @@ class Database:
                 君元规格 TEXT,
                 君元生产厂家 TEXT,
                 君元库存数量 TEXT,
+                三同药品参比价 TEXT,
                 医保基础价格 TEXT,
                 医保基础价格_中成药 TEXT,
                 医保价格上限 TEXT,
@@ -895,6 +897,7 @@ class Database:
                 君元单片价 TEXT,
                 异常等级 TEXT,
                 超基础金额 TEXT,
+                超基础金额_中成药 TEXT,
                 超上限金额 TEXT,
                 处理状态 TEXT DEFAULT '未处理',
                 处理备注 TEXT,
@@ -925,6 +928,47 @@ class Database:
                 比对人 TEXT,
                 比对时间 TEXT,
                 created_at TEXT NOT NULL
+            )
+        ''')
+        
+        # 采购候选评分表（一期落库）
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS purchase_candidate_scores (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                purchase_batch_id TEXT NOT NULL,
+                purchase_detail_id TEXT NOT NULL,
+                purchase_status TEXT,
+                rule_set_code TEXT,
+                search_keyword TEXT,
+                candidate_rank INTEGER,
+                candidate_name TEXT,
+                candidate_spec TEXT,
+                candidate_maker TEXT,
+                candidate_supplier TEXT,
+                candidate_supplier_full TEXT,
+                candidate_price TEXT,
+                compare_price TEXT,
+                max_allowed_price TEXT,
+                min_purchase_quantity TEXT,
+                candidate_stock TEXT,
+                name_score INTEGER,
+                spec_score INTEGER,
+                maker_score INTEGER,
+                total_score INTEGER,
+                identity_pass INTEGER,
+                spec_conflict INTEGER,
+                spec_pass INTEGER,
+                maker_pass INTEGER,
+                supplier_pass INTEGER,
+                price_pass INTEGER,
+                qty_pass INTEGER,
+                stock_pass INTEGER,
+                final_pass INTEGER,
+                selected INTEGER,
+                reject_reason TEXT,
+                raw_data TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
             )
         ''')
         
@@ -969,6 +1013,551 @@ class Database:
             ON medical_price_compare_result(异常等级)
         ''')
         
+        # 采购候选评分表索引
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_purchase_candidate_batch
+            ON purchase_candidate_scores(purchase_batch_id)
+        ''')
+        
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_purchase_candidate_detail
+            ON purchase_candidate_scores(purchase_detail_id)
+        ''')
+        
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_purchase_candidate_total_score
+            ON purchase_candidate_scores(total_score)
+        ''')
+        
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_purchase_candidate_final_pass
+            ON purchase_candidate_scores(final_pass)
+        ''')
+        
+        # ========== 智能采购相关表（smart_*系列表）==========
+        
+        # 规则集表
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS smart_match_rule_sets (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                rule_set_code TEXT UNIQUE NOT NULL,
+                rule_set_name TEXT NOT NULL,
+                description TEXT,
+                is_default INTEGER DEFAULT 0,
+                is_enabled INTEGER DEFAULT 1,
+                created_by TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                -- 二期新增字段：规则版本管理
+                version_number TEXT DEFAULT 'v1.0.0',
+                version_status TEXT DEFAULT 'active',
+                release_date TEXT,
+                deprecation_date TEXT,
+                change_reason TEXT,
+                change_type TEXT DEFAULT 'new',
+                audit_status TEXT DEFAULT 'approved',
+                audit_by TEXT,
+                audit_at TEXT,
+                audit_comment TEXT,
+                gray_release_scope TEXT,
+                gray_release_ratio INTEGER DEFAULT 0,
+                gray_release_status TEXT DEFAULT 'none',
+                updated_by TEXT
+            )
+        ''')
+        
+        # 规则配置表
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS smart_match_rule_configs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                rule_set_code TEXT NOT NULL,
+                rule_key TEXT NOT NULL,
+                rule_name TEXT NOT NULL,
+                rule_value TEXT NOT NULL,
+                rule_type TEXT NOT NULL,
+                description TEXT,
+                sort_order INTEGER DEFAULT 0,
+                is_enabled INTEGER DEFAULT 1,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(rule_set_code, rule_key)
+            )
+        ''')
+
+        # 三期新增：规则版本历史表
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS smart_match_rule_set_versions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                rule_set_code TEXT NOT NULL,
+                version_number TEXT NOT NULL,
+                version_name TEXT,
+                configs_json TEXT NOT NULL,
+                change_reason TEXT,
+                change_type TEXT DEFAULT 'update',
+                created_by TEXT,
+                created_at TEXT NOT NULL,
+                is_active INTEGER DEFAULT 0,
+                UNIQUE(rule_set_code, version_number)
+            )
+        ''')
+
+        # 候选过程表
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS smart_purchase_candidates (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                purchase_batch_id TEXT NOT NULL,
+                purchase_detail_id TEXT NOT NULL,
+                rule_set_code TEXT NOT NULL,
+                search_keyword TEXT NOT NULL,
+                candidate_rank INTEGER NOT NULL,
+                candidate_name TEXT,
+                candidate_spec TEXT,
+                candidate_maker TEXT,
+                candidate_supplier TEXT,
+                candidate_supplier_full TEXT,
+                candidate_price TEXT,
+                compare_price TEXT,
+                max_allowed_price TEXT,
+                min_purchase_quantity TEXT,
+                candidate_stock TEXT,
+                name_score INTEGER,
+                spec_score INTEGER,
+                maker_score INTEGER,
+                total_score INTEGER,
+                identity_pass INTEGER,
+                spec_conflict INTEGER,
+                spec_pass INTEGER,
+                maker_pass INTEGER,
+                supplier_pass INTEGER,
+                price_pass INTEGER,
+                qty_pass INTEGER,
+                stock_pass INTEGER,
+                final_pass INTEGER,
+                selected INTEGER,
+                reject_reason TEXT,
+                raw_data TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+        ''')
+        
+        # 购物车快照表
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS smart_cart_snapshots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                snapshot_batch_id TEXT UNIQUE NOT NULL,
+                snapshot_type TEXT NOT NULL,
+                total_items INTEGER DEFAULT 0,
+                matched_items INTEGER DEFAULT 0,
+                unmatched_items INTEGER DEFAULT 0,
+                snapshot_status TEXT DEFAULT 'pending',
+                snapshot_time TEXT NOT NULL,
+                created_by TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+        ''')
+        
+        # 购物车快照明细表
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS smart_cart_snapshot_items (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                snapshot_batch_id TEXT NOT NULL,
+                item_index INTEGER NOT NULL,
+                item_name TEXT,
+                item_spec TEXT,
+                item_maker TEXT,
+                item_supplier TEXT,
+                item_price TEXT,
+                item_quantity TEXT,
+                item_stock TEXT,
+                match_status TEXT DEFAULT 'pending',
+                match_detail TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+        ''')
+        
+        # 购物车反写匹配表
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS smart_cart_backfill_matches (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                snapshot_batch_id TEXT NOT NULL,
+                snapshot_item_id TEXT NOT NULL,
+                purchase_batch_id TEXT NOT NULL,
+                purchase_detail_id TEXT NOT NULL,
+                match_type TEXT NOT NULL,
+                match_score INTEGER,
+                match_status TEXT DEFAULT 'pending',
+                match_detail TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+        ''')
+        
+        # ========== 智能采购规则辅助表（smart_*系列表）==========
+        
+        # 规格单位别名表
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS smart_spec_unit_aliases (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                unit_alias TEXT UNIQUE NOT NULL,
+                unit_standard TEXT NOT NULL,
+                description TEXT,
+                is_enabled INTEGER DEFAULT 1,
+                created_by TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+        ''')
+        
+        # 规格解析规则表
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS smart_spec_parse_rules (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                rule_code TEXT UNIQUE NOT NULL,
+                rule_name TEXT NOT NULL,
+                parse_pattern TEXT NOT NULL,
+                extract_fields TEXT NOT NULL,
+                description TEXT,
+                sort_order INTEGER DEFAULT 0,
+                is_enabled INTEGER DEFAULT 1,
+                created_by TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+        ''')
+        
+        # 匹配阈值表
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS smart_match_thresholds (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                threshold_code TEXT UNIQUE NOT NULL,
+                threshold_name TEXT NOT NULL,
+                threshold_value TEXT NOT NULL,
+                threshold_type TEXT NOT NULL,
+                description TEXT,
+                is_enabled INTEGER DEFAULT 1,
+                created_by TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+        ''')
+        
+        # ========== 二期新增：规则变更审核记录表 ==========
+        
+        # 规则变更审核记录表
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS smart_rule_audit_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                audit_id TEXT UNIQUE NOT NULL,
+                rule_set_code TEXT NOT NULL,
+                change_type TEXT NOT NULL,
+                change_reason TEXT,
+                old_version TEXT,
+                new_version TEXT,
+                old_config TEXT,
+                new_config TEXT,
+                audit_status TEXT NOT NULL DEFAULT 'pending',
+                audit_by TEXT,
+                audit_at TEXT,
+                audit_comment TEXT,
+                created_by TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+        ''')
+        
+        # 规则灰度发布记录表
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS smart_rule_gray_release_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                release_id TEXT UNIQUE NOT NULL,
+                rule_set_code TEXT NOT NULL,
+                gray_type TEXT NOT NULL,
+                gray_scope TEXT,
+                gray_ratio INTEGER DEFAULT 0,
+                gray_status TEXT NOT NULL DEFAULT 'testing',
+                start_time TEXT NOT NULL,
+                end_time TEXT,
+                monitoring_metrics TEXT,
+                rollback_threshold TEXT,
+                rollback_reason TEXT,
+                created_by TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+        ''')
+        
+        # 规则效果统计表
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS smart_rule_effect_stats (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                stat_id TEXT UNIQUE NOT NULL,
+                rule_set_code TEXT NOT NULL,
+                stat_date TEXT NOT NULL,
+                total_batches INTEGER DEFAULT 0,
+                total_items INTEGER DEFAULT 0,
+                matched_items INTEGER DEFAULT 0,
+                purchased_items INTEGER DEFAULT 0,
+                failed_items INTEGER DEFAULT 0,
+                match_success_rate REAL DEFAULT 0,
+                purchase_success_rate REAL DEFAULT 0,
+                avg_match_score REAL DEFAULT 0,
+                avg_purchase_price REAL DEFAULT 0,
+                failure_reason_distribution TEXT,
+                score_distribution TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+        ''')
+        
+        # 规则生效范围配置表（二期阶段三）
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS smart_rule_scope_configs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                scope_id TEXT UNIQUE NOT NULL,
+                rule_set_code TEXT NOT NULL,
+                scope_type TEXT NOT NULL,
+                scope_value TEXT NOT NULL,
+                scope_priority INTEGER DEFAULT 0,
+                scope_status TEXT NOT NULL DEFAULT 'active',
+                created_by TEXT,
+                updated_by TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+        ''')
+        
+        # 规则参数调整记录表（二期阶段六）
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS smart_rule_param_adjustments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                adjustment_id TEXT UNIQUE NOT NULL,
+                rule_set_code TEXT NOT NULL,
+                adjustment_type TEXT NOT NULL,
+                old_params TEXT,
+                new_params TEXT NOT NULL,
+                adjustment_reason TEXT,
+                test_status TEXT DEFAULT 'pending',
+                test_result TEXT,
+                verify_status TEXT DEFAULT 'pending',
+                verify_result TEXT,
+                created_by TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+        ''')
+        
+        # 名称别名表
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS smart_name_aliases (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name_alias TEXT UNIQUE NOT NULL,
+                name_standard TEXT NOT NULL,
+                description TEXT,
+                is_enabled INTEGER DEFAULT 1,
+                created_by TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+        ''')
+
+        # ========== 二期第一轮整改：规则运行快照表 ==========
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS smart_match_rule_snapshots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                snapshot_id TEXT NOT NULL UNIQUE,
+                batch_id TEXT NOT NULL,
+                rule_set_code TEXT NOT NULL,
+                rule_set_version TEXT,
+                snapshot_json TEXT NOT NULL,
+                fallback_used INTEGER DEFAULT 0,
+                fallback_reason TEXT,
+                source TEXT DEFAULT 'smart_purchase',
+                created_at TEXT NOT NULL
+            )
+        ''')
+
+        # ========== 二期第一轮整改：失败原因结构化表 ==========
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS smart_purchase_failure_reasons (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                batch_id TEXT NOT NULL,
+                item_id TEXT NOT NULL,
+                row_number INTEGER,
+                rule_set_code TEXT,
+                rule_snapshot_id TEXT,
+                failure_stage TEXT,
+                failure_code TEXT,
+                failure_message TEXT,
+                failure_detail TEXT,
+                suggestion TEXT,
+                raw_reason TEXT,
+                created_at TEXT NOT NULL
+            )
+        ''')
+
+        # ========== 二期第一轮整改：规则变更日志表 ==========
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS smart_match_rule_change_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                rule_set_code TEXT NOT NULL,
+                change_type TEXT NOT NULL,
+                field_path TEXT,
+                old_value TEXT,
+                new_value TEXT,
+                change_reason TEXT,
+                changed_by TEXT,
+                changed_at TEXT NOT NULL
+            )
+        ''')
+
+        # ========== 二期第一轮整改：规则发布日志表 ==========
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS smart_match_rule_publish_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                rule_set_code TEXT NOT NULL,
+                version_no TEXT,
+                publish_status TEXT NOT NULL,
+                publish_summary TEXT,
+                test_result_json TEXT,
+                published_by TEXT,
+                published_at TEXT NOT NULL
+            )
+        ''')
+        
+        # 创建索引
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_smart_rule_sets_code
+            ON smart_match_rule_sets(rule_set_code)
+        ''')
+        
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_smart_rule_configs_set
+            ON smart_match_rule_configs(rule_set_code)
+        ''')
+        
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_smart_purchase_candidates_batch
+            ON smart_purchase_candidates(purchase_batch_id)
+        ''')
+        
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_smart_purchase_candidates_detail
+            ON smart_purchase_candidates(purchase_detail_id)
+        ''')
+        
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_smart_cart_snapshots_batch
+            ON smart_cart_snapshots(snapshot_batch_id)
+        ''')
+        
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_smart_cart_snapshot_items_batch
+            ON smart_cart_snapshot_items(snapshot_batch_id)
+        ''')
+        
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_smart_cart_backfill_matches_batch
+            ON smart_cart_backfill_matches(snapshot_batch_id)
+        ''')
+        
+        # ========== 二期新增表索引 ==========
+        
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_smart_rule_audit_logs_rule
+            ON smart_rule_audit_logs(rule_set_code)
+        ''')
+        
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_smart_rule_audit_logs_status
+            ON smart_rule_audit_logs(audit_status)
+        ''')
+        
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_smart_rule_gray_release_logs_rule
+            ON smart_rule_gray_release_logs(rule_set_code)
+        ''')
+        
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_smart_rule_gray_release_logs_status
+            ON smart_rule_gray_release_logs(gray_status)
+        ''')
+        
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_smart_rule_effect_stats_rule
+            ON smart_rule_effect_stats(rule_set_code)
+        ''')
+        
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_smart_rule_effect_stats_date
+            ON smart_rule_effect_stats(stat_date)
+        ''')
+        
+        # 规则生效范围配置表索引
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_smart_rule_scope_configs_rule
+            ON smart_rule_scope_configs(rule_set_code)
+        ''')
+        
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_smart_rule_scope_configs_type
+            ON smart_rule_scope_configs(scope_type)
+        ''')
+        
+        # 规则参数调整记录表索引
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_smart_rule_param_adjustments_rule
+            ON smart_rule_param_adjustments(rule_set_code)
+        ''')
+        
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_smart_rule_param_adjustments_status
+            ON smart_rule_param_adjustments(test_status)
+        ''')
+
+        # ========== 二期第一轮整改：新表索引 ==========
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_smart_match_rule_snapshots_batch
+            ON smart_match_rule_snapshots(batch_id)
+        ''')
+
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_smart_match_rule_snapshots_code
+            ON smart_match_rule_snapshots(rule_set_code)
+        ''')
+
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_smart_purchase_failure_reasons_batch
+            ON smart_purchase_failure_reasons(batch_id)
+        ''')
+
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_smart_purchase_failure_reasons_code
+            ON smart_purchase_failure_reasons(failure_code)
+        ''')
+
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_smart_purchase_failure_reasons_stage
+            ON smart_purchase_failure_reasons(failure_stage)
+        ''')
+
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_smart_purchase_failure_reasons_snapshot
+            ON smart_purchase_failure_reasons(rule_snapshot_id)
+        ''')
+
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_smart_match_rule_change_logs_code
+            ON smart_match_rule_change_logs(rule_set_code)
+        ''')
+
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_smart_match_rule_publish_logs_code
+            ON smart_match_rule_publish_logs(rule_set_code)
+        ''')
+
         conn.commit()
         
         self._migrate_add_raw_data_columns()
@@ -981,10 +1570,16 @@ class Database:
         self._migrate_fill_created_by_for_historical_data()
         self._migrate_user_roles_from_single_role()
         self._migrate_add_raw_data_columns_full()
+        self._migrate_add_rule_snapshot_id_columns()
+        self._migrate_add_failure_code_columns()
+        self._migrate_add_rule_set_version_number()
+        self._migrate_canonical_rule_keys()
+        self._migrate_add_batch_rule_fields()
         
         self._create_default_admin_if_not_exists()
         self._init_app_settings()
         self._init_default_roles_and_permissions()
+        self._init_default_rule_sets()
         
         logging.info("数据库初始化完成")
     
@@ -1463,6 +2058,82 @@ class Database:
         conn.commit()
         logging.info("Database log message")
     
+    def _init_default_rule_sets(self):
+        """初始化默认规则集"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        
+        now = datetime.now().isoformat()
+        
+        # 初始化规则集
+        rule_sets_data = [
+            ('default_v1', '默认规则集v1', '默认的智能采购匹配规则集', 1, 1, 'system', now, now),
+            ('strict_spec_v1', '严格规格规则集v1', '严格规格匹配的智能采购规则集', 0, 1, 'system', now, now),
+        ]
+        
+        for rule_set_code, rule_set_name, description, is_default, is_enabled, created_by, created_at, updated_at in rule_sets_data:
+            cursor.execute('''
+                INSERT OR IGNORE INTO smart_match_rule_sets (rule_set_code, rule_set_name, description, is_default, is_enabled, created_by, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (rule_set_code, rule_set_name, description, is_default, is_enabled, created_by, created_at, updated_at))
+        
+        # 初始化规则配置 - default_v1
+        default_v1_configs = [
+            # 三期 canonical 键
+            ('default_v1', 'name_weight', '名称权重', '0.62', 'number', '名称匹配的权重', 1, 1, now, now),
+            ('default_v1', 'spec_weight', '规格权重', '0.20', 'number', '规格匹配的权重', 2, 1, now, now),
+            ('default_v1', 'maker_weight', '厂家权重', '0.18', 'number', '厂家匹配的权重', 3, 1, now, now),
+            ('default_v1', 'min_purchase_score', '候选采购最低总分', '70', 'number', '总分达到此阈值才合格', 4, 1, now, now),
+            ('default_v1', 'cart_backfill_min_score', '购物车反写最低分', '60', 'number', '购物车反写最低分', 5, 1, now, now),
+            ('default_v1', 'spec_conflict_block', '规格冲突是否阻断', '0', 'boolean', '规格冲突是否阻断采购', 6, 1, now, now),
+            ('default_v1', 'maker_strict', '厂家严格匹配', '0', 'boolean', '是否严格匹配厂家', 7, 1, now, now),
+            ('default_v1', 'supplier_scope_required', '是否必须命中供应商范围', '0', 'boolean', '是否必须命中供应商范围', 8, 1, now, now),
+            ('default_v1', 'price_check_enabled', '是否启用价格校验', '1', 'boolean', '是否启用价格校验', 9, 1, now, now),
+            ('default_v1', 'price_compare_discount', '候选价格折算系数', '0.97', 'number', '候选价格折算系数', 10, 1, now, now),
+            ('default_v1', 'price_upper_rate', '最高允许价比例', '1.05', 'number', '最高允许价比例', 11, 1, now, now),
+            ('default_v1', 'price_upper_plus', '最高允许价固定增量', '1', 'number', '最高允许价固定增量', 12, 1, now, now),
+            ('default_v1', 'name_core_min_score', '名称核心相似最低分', '70', 'number', '名称核心相似最低分', 13, 1, now, now),
+            ('default_v1', 'spec_similar_min_score', '规格相似最低分', '70', 'number', '规格相似最低分', 14, 1, now, now),
+            ('default_v1', 'factory_similar_min_score', '厂家筛选相似最低分', '70', 'number', '厂家筛选相似最低分', 15, 1, now, now),
+            ('default_v1', 'cart_existing_same_product_min_score', '购物车同品种识别最低分', '70', 'number', '购物车同品种识别最低分', 16, 1, now, now),
+        ]
+        
+        for rule_set_code, rule_key, rule_name, rule_value, rule_type, description, sort_order, is_enabled, created_at, updated_at in default_v1_configs:
+            cursor.execute('''
+                INSERT OR IGNORE INTO smart_match_rule_configs (rule_set_code, rule_key, rule_name, rule_value, rule_type, description, sort_order, is_enabled, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (rule_set_code, rule_key, rule_name, rule_value, rule_type, description, sort_order, is_enabled, created_at, updated_at))
+        
+        # 初始化规则配置 - strict_spec_v1
+        strict_spec_v1_configs = [
+            # 三期 canonical 键
+            ('strict_spec_v1', 'name_weight', '名称权重', '0.62', 'number', '名称匹配的权重', 1, 1, now, now),
+            ('strict_spec_v1', 'spec_weight', '规格权重', '0.20', 'number', '规格匹配的权重', 2, 1, now, now),
+            ('strict_spec_v1', 'maker_weight', '厂家权重', '0.18', 'number', '厂家匹配的权重', 3, 1, now, now),
+            ('strict_spec_v1', 'min_purchase_score', '候选采购最低总分', '70', 'number', '总分达到此阈值才合格', 4, 1, now, now),
+            ('strict_spec_v1', 'cart_backfill_min_score', '购物车反写最低分', '60', 'number', '购物车反写最低分', 5, 1, now, now),
+            ('strict_spec_v1', 'spec_conflict_block', '规格冲突是否阻断', '1', 'boolean', '规格冲突是否阻断采购', 6, 1, now, now),
+            ('strict_spec_v1', 'maker_strict', '厂家严格匹配', '0', 'boolean', '是否严格匹配厂家', 7, 1, now, now),
+            ('strict_spec_v1', 'supplier_scope_required', '是否必须命中供应商范围', '0', 'boolean', '是否必须命中供应商范围', 8, 1, now, now),
+            ('strict_spec_v1', 'price_check_enabled', '是否启用价格校验', '1', 'boolean', '是否启用价格校验', 9, 1, now, now),
+            ('strict_spec_v1', 'price_compare_discount', '候选价格折算系数', '0.97', 'number', '候选价格折算系数', 10, 1, now, now),
+            ('strict_spec_v1', 'price_upper_rate', '最高允许价比例', '1.05', 'number', '最高允许价比例', 11, 1, now, now),
+            ('strict_spec_v1', 'price_upper_plus', '最高允许价固定增量', '1', 'number', '最高允许价固定增量', 12, 1, now, now),
+            ('strict_spec_v1', 'name_core_min_score', '名称核心相似最低分', '70', 'number', '名称核心相似最低分', 13, 1, now, now),
+            ('strict_spec_v1', 'spec_similar_min_score', '规格相似最低分', '70', 'number', '规格相似最低分', 14, 1, now, now),
+            ('strict_spec_v1', 'factory_similar_min_score', '厂家筛选相似最低分', '70', 'number', '厂家筛选相似最低分', 15, 1, now, now),
+            ('strict_spec_v1', 'cart_existing_same_product_min_score', '购物车同品种识别最低分', '70', 'number', '购物车同品种识别最低分', 16, 1, now, now),
+        ]
+        
+        for rule_set_code, rule_key, rule_name, rule_value, rule_type, description, sort_order, is_enabled, created_at, updated_at in strict_spec_v1_configs:
+            cursor.execute('''
+                INSERT OR IGNORE INTO smart_match_rule_configs (rule_set_code, rule_key, rule_name, rule_value, rule_type, description, sort_order, is_enabled, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (rule_set_code, rule_key, rule_name, rule_value, rule_type, description, sort_order, is_enabled, created_at, updated_at))
+        
+        conn.commit()
+        logging.info("默认规则集初始化完成")
+    
     def _migrate_add_raw_data_columns_full(self):
         """Migrate raw_data related columns."""
         conn = self.get_connection()
@@ -1551,6 +2222,7 @@ class Database:
             
             jy_sales_fields = [
                 ('库存数量', 'TEXT'),
+                ('三月销量', 'TEXT'),
             ]
             
             for field_name, field_type in jy_sales_fields:
@@ -1568,10 +2240,12 @@ class Database:
                 ('君元规格', 'TEXT'),
                 ('君元生产厂家', 'TEXT'),
                 ('君元库存数量', 'TEXT'),
+                ('三同药品参比价', 'TEXT'),
                 ('医保基础价格_中成药', 'TEXT'),
                 ('西药医保编码', 'TEXT'),
                 ('中成药医保编码', 'TEXT'),
                 ('三同医保编码', 'TEXT'),
+                ('超基础金额_中成药', 'TEXT'),
             ]
             
             for field_name, field_type in medical_fields:
@@ -1583,7 +2257,237 @@ class Database:
         except Exception as e:
             logging.warning(f"数据库迁移失败（字段可能已存在）: {e}")
             conn.rollback()
-    
+
+    def _migrate_add_rule_snapshot_id_columns(self):
+        """为候选表和反写表添加 rule_snapshot_id 字段"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        try:
+            # smart_purchase_candidates 添加 rule_snapshot_id
+            cursor.execute("PRAGMA table_info(smart_purchase_candidates)")
+            columns = [row['name'] for row in cursor.fetchall()]
+            if 'rule_snapshot_id' not in columns:
+                cursor.execute("ALTER TABLE smart_purchase_candidates ADD COLUMN rule_snapshot_id TEXT")
+                logging.info("✓ 为 smart_purchase_candidates 表添加 rule_snapshot_id 字段")
+
+            # smart_cart_backfill_matches 添加 rule_snapshot_id
+            cursor.execute("PRAGMA table_info(smart_cart_backfill_matches)")
+            columns = [row['name'] for row in cursor.fetchall()]
+            if 'rule_snapshot_id' not in columns:
+                cursor.execute("ALTER TABLE smart_cart_backfill_matches ADD COLUMN rule_snapshot_id TEXT")
+                logging.info("✓ 为 smart_cart_backfill_matches 表添加 rule_snapshot_id 字段")
+
+            # purchase_candidate_scores 添加 rule_snapshot_id
+            cursor.execute("PRAGMA table_info(purchase_candidate_scores)")
+            columns = [row['name'] for row in cursor.fetchall()]
+            if 'rule_snapshot_id' not in columns:
+                cursor.execute("ALTER TABLE purchase_candidate_scores ADD COLUMN rule_snapshot_id TEXT")
+                logging.info("✓ 为 purchase_candidate_scores 表添加 rule_snapshot_id 字段")
+
+            conn.commit()
+        except Exception as e:
+            logging.warning(f"添加 rule_snapshot_id 字段迁移失败: {e}")
+            conn.rollback()
+
+    def _migrate_add_failure_code_columns(self):
+        """为采购明细表添加 failure_stage 和 failure_code 字段"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        try:
+            # 先检查表是否存在
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='smart_purchase_items'")
+            if not cursor.fetchone():
+                return
+            cursor.execute("PRAGMA table_info(smart_purchase_items)")
+            columns = [row['name'] for row in cursor.fetchall()]
+            if 'failure_stage' not in columns:
+                cursor.execute("ALTER TABLE smart_purchase_items ADD COLUMN failure_stage TEXT")
+                logging.info("✓ 为 smart_purchase_items 表添加 failure_stage 字段")
+            if 'failure_code' not in columns:
+                cursor.execute("ALTER TABLE smart_purchase_items ADD COLUMN failure_code TEXT")
+                logging.info("✓ 为 smart_purchase_items 表添加 failure_code 字段")
+            conn.commit()
+        except Exception as e:
+            logging.warning(f"添加 failure_code 字段迁移失败: {e}")
+            conn.rollback()
+
+    def _migrate_add_rule_set_version_number(self):
+        """为历史数据库的 smart_match_rule_sets 表补充 version_number 等二期字段"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        try:
+            # 检查表是否存在
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='smart_match_rule_sets'")
+            if not cursor.fetchone():
+                return
+
+            cursor.execute("PRAGMA table_info(smart_match_rule_sets)")
+            columns = [row['name'] for row in cursor.fetchall()]
+
+            # 逐个添加缺失的二期字段（幂等：已存在则跳过）
+            new_columns = [
+                ("version_number", "TEXT DEFAULT 'v1.0.0'"),
+                ("version_status", "TEXT DEFAULT 'active'"),
+                ("release_date", "TEXT"),
+                ("deprecation_date", "TEXT"),
+                ("change_reason", "TEXT"),
+                ("change_type", "TEXT DEFAULT 'new'"),
+                ("audit_status", "TEXT DEFAULT 'approved'"),
+                ("audit_by", "TEXT"),
+                ("audit_at", "TEXT"),
+                ("audit_comment", "TEXT"),
+                ("gray_release_scope", "TEXT"),
+                ("gray_release_ratio", "INTEGER DEFAULT 0"),
+                ("gray_release_status", "TEXT DEFAULT 'none'"),
+                ("updated_by", "TEXT"),
+            ]
+
+            for col_name, col_def in new_columns:
+                if col_name not in columns:
+                    cursor.execute(f"ALTER TABLE smart_match_rule_sets ADD COLUMN {col_name} {col_def}")
+                    logging.info(f"✓ 为 smart_match_rule_sets 表添加 {col_name} 字段")
+
+            # 为现有规则集填充默认版本号（仅当 version_number 为空时）
+            cursor.execute(
+                "UPDATE smart_match_rule_sets SET version_number = 'v1.0.0' WHERE version_number IS NULL OR version_number = ''"
+            )
+
+            conn.commit()
+        except Exception as e:
+            logging.warning(f"添加 rule_set version_number 字段迁移失败: {e}")
+            conn.rollback()
+
+    def _migrate_canonical_rule_keys(self):
+        """三期迁移：将旧规则键迁移为 canonical 键，并补充缺失的 canonical 配置项"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        try:
+            # 检查表是否存在
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='smart_match_rule_configs'")
+            if not cursor.fetchone():
+                return
+
+            # 旧键到 canonical 键的映射
+            key_mapping = {
+                "total_score_threshold": "min_purchase_score",
+                "price_tolerance": "price_compare_discount",
+                "spec_strict": "spec_conflict_block",
+            }
+
+            for old_key, new_key in key_mapping.items():
+                # 检查旧键是否存在
+                cursor.execute(
+                    "SELECT rule_set_code, rule_value, rule_type FROM smart_match_rule_configs WHERE rule_key = ?",
+                    (old_key,)
+                )
+                old_rows = cursor.fetchall()
+
+                for row in old_rows:
+                    rule_set_code = row["rule_set_code"]
+                    rule_value = row["rule_value"]
+                    rule_type = row["rule_type"]
+
+                    # 检查 canonical 键是否已存在
+                    cursor.execute(
+                        "SELECT id FROM smart_match_rule_configs WHERE rule_set_code = ? AND rule_key = ?",
+                        (rule_set_code, new_key)
+                    )
+                    existing = cursor.fetchone()
+
+                    if existing:
+                        # canonical 键已存在，删除旧键
+                        cursor.execute(
+                            "DELETE FROM smart_match_rule_configs WHERE rule_set_code = ? AND rule_key = ?",
+                            (rule_set_code, old_key)
+                        )
+                        logging.info(f"✓ 删除旧键 {old_key}（canonical 键 {new_key} 已存在）: {rule_set_code}")
+                    else:
+                        # canonical 键不存在，将旧键重命名为 canonical 键
+                        cursor.execute(
+                            "UPDATE smart_match_rule_configs SET rule_key = ? WHERE rule_set_code = ? AND rule_key = ?",
+                            (new_key, rule_set_code, old_key)
+                        )
+                        logging.info(f"✓ 迁移旧键 {old_key} → {new_key}: {rule_set_code}")
+
+            # 补充缺失的 canonical 配置项
+            now = datetime.now().isoformat()
+            canonical_configs = {
+                "default_v1": [
+                    ("cart_backfill_min_score", "购物车反写最低分", "60", "number", "购物车反写最低分", 5),
+                    ("supplier_scope_required", "是否必须命中供应商范围", "0", "boolean", "是否必须命中供应商范围", 8),
+                    ("price_check_enabled", "是否启用价格校验", "1", "boolean", "是否启用价格校验", 9),
+                    ("price_upper_rate", "最高允许价比例", "1.05", "number", "最高允许价比例", 11),
+                    ("price_upper_plus", "最高允许价固定增量", "1", "number", "最高允许价固定增量", 12),
+                    ("name_core_min_score", "名称核心相似最低分", "70", "number", "名称核心相似最低分", 13),
+                    ("spec_similar_min_score", "规格相似最低分", "70", "number", "规格相似最低分", 14),
+                    ("factory_similar_min_score", "厂家筛选相似最低分", "70", "number", "厂家筛选相似最低分", 15),
+                    ("cart_existing_same_product_min_score", "购物车同品种识别最低分", "70", "number", "购物车同品种识别最低分", 16),
+                ],
+                "strict_spec_v1": [
+                    ("cart_backfill_min_score", "购物车反写最低分", "60", "number", "购物车反写最低分", 5),
+                    ("supplier_scope_required", "是否必须命中供应商范围", "0", "boolean", "是否必须命中供应商范围", 8),
+                    ("price_check_enabled", "是否启用价格校验", "1", "boolean", "是否启用价格校验", 9),
+                    ("price_upper_rate", "最高允许价比例", "1.05", "number", "最高允许价比例", 11),
+                    ("price_upper_plus", "最高允许价固定增量", "1", "number", "最高允许价固定增量", 12),
+                    ("name_core_min_score", "名称核心相似最低分", "70", "number", "名称核心相似最低分", 13),
+                    ("spec_similar_min_score", "规格相似最低分", "70", "number", "规格相似最低分", 14),
+                    ("factory_similar_min_score", "厂家筛选相似最低分", "70", "number", "厂家筛选相似最低分", 15),
+                    ("cart_existing_same_product_min_score", "购物车同品种识别最低分", "70", "number", "购物车同品种识别最低分", 16),
+                ],
+            }
+
+            for rule_set_code, configs in canonical_configs.items():
+                for rule_key, rule_name, rule_value, rule_type, description, sort_order in configs:
+                    cursor.execute(
+                        "SELECT id FROM smart_match_rule_configs WHERE rule_set_code = ? AND rule_key = ?",
+                        (rule_set_code, rule_key)
+                    )
+                    if not cursor.fetchone():
+                        cursor.execute('''
+                            INSERT INTO smart_match_rule_configs (rule_set_code, rule_key, rule_name, rule_value, rule_type, description, sort_order, is_enabled, created_at, updated_at)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+                        ''', (rule_set_code, rule_key, rule_name, rule_value, rule_type, description, sort_order, now, now))
+                        logging.info(f"✓ 补充 canonical 键 {rule_key}: {rule_set_code}")
+
+            conn.commit()
+            logging.info("三期 canonical 键迁移完成")
+        except Exception as e:
+            logging.warning(f"三期 canonical 键迁移失败: {e}")
+            conn.rollback()
+
+    def _migrate_add_batch_rule_fields(self):
+        """三期迁移：为 smart_purchase_batches 表补充规则选择字段"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        try:
+            # 检查表是否存在
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='smart_purchase_batches'")
+            if not cursor.fetchone():
+                return
+
+            cursor.execute("PRAGMA table_info(smart_purchase_batches)")
+            columns = [row['name'] for row in cursor.fetchall()]
+
+            new_columns = [
+                ("rule_set_code", "TEXT"),
+                ("rule_set_version", "TEXT"),
+                ("rule_select_mode", "TEXT DEFAULT 'default'"),
+                ("rule_select_reason", "TEXT"),
+                ("rule_snapshot_id", "TEXT"),
+                ("rule_selected_by", "TEXT"),
+                ("rule_selected_at", "TEXT"),
+            ]
+
+            for col_name, col_def in new_columns:
+                if col_name not in columns:
+                    cursor.execute(f"ALTER TABLE smart_purchase_batches ADD COLUMN {col_name} {col_def}")
+                    logging.info(f"✓ 为 smart_purchase_batches 表添加 {col_name} 字段")
+
+            conn.commit()
+        except Exception as e:
+            logging.warning(f"添加批次规则字段迁移失败: {e}")
+            conn.rollback()
+
     def _create_default_admin_if_not_exists(self):
         conn = self.get_connection()
         cursor = conn.cursor()
