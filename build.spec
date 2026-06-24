@@ -1,18 +1,23 @@
 # -*- mode: python ; coding: utf-8 -*-
-import sys
-from pathlib import Path
 
 block_cipher = None
 
 a = Analysis(
     ['app/main.py'],
-    pathex=[],
+    pathex=[r'D:\project\RPA'],
     binaries=[],
     datas=[],
     hiddenimports=[
-        'PySide6.QtCore',
-        'PySide6.QtGui',
-        'PySide6.QtWidgets',
+        'app.config',
+        'app.storage.database',
+        'app.core.tts_service',
+        'app.wecom_bot',
+        'app.wecom_bot.config',
+        'pymysql',
+        'openpyxl',
+        'xlrd',
+        'cryptography',
+        'cryptography.fernet',
     ],
     hookspath=[],
     hooksconfig={},

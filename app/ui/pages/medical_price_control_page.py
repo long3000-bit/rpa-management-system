@@ -389,7 +389,7 @@ class MedicalPriceControlPage(QWidget):
         self.compare_batch_table = QTableWidget()
         self.compare_batch_table.setColumnCount(8)
         self.compare_batch_table.setHorizontalHeaderLabels([
-            "批次ID", "正常", "异常", "严重异常", "待补价格", "待补编码", "待确认", "比对时间"
+            "批次ID", "比对时间", "总数量", "正常", "异常", "严重异常", "待确认", "比对状态"
         ])
         self.compare_batch_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         compare_batch_layout.addWidget(self.compare_batch_table)

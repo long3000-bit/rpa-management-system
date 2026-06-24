@@ -181,7 +181,8 @@ class MedicalPriceCompareService:
                     jy.销售价,
                     jy.包装价,
                     jy.单片价,
-                    mpl.三同药品参比价 as 医保价格上限,
+                    mpl.三同药品参比价,
+                    mpl.三同药品参比价 * 1.38 as 医保价格上限,
                     COALESCE(
                         NULLIF(mcw.医保支付标准, ''),
                         NULLIF(mcw.省集中采购上限价含企业承诺价, ''),
@@ -229,16 +230,25 @@ class MedicalPriceCompareService:
                     abnormal_level = self._determine_abnormal_level(row)
                     
                     # 计算超额金额
-                    base_price = self._parse_decimal(row.get('医保基础价格') or row.get('医保基础价格_中成药'))
+                    base_price_western = self._parse_decimal(row.get('医保基础价格'))
+                    base_price_chinese = self._parse_decimal(row.get('医保基础价格_中成药'))
                     limit_price = self._parse_decimal(row.get('医保价格上限'))
                     sales_price = self._parse_decimal(row.get('销售价'))
                     
-                    over_base_amount = ""
+                    # 分别计算两个超基础金额
+                    over_base_amount_western = ""
+                    over_base_amount_chinese = ""
                     over_limit_amount = ""
                     
-                    if base_price and sales_price and sales_price > base_price:
-                        over_base_amount = str(sales_price - base_price)
+                    # 超基础金额（西药）= 君元销售价 - 医保基础价格
+                    if base_price_western and sales_price and sales_price > base_price_western:
+                        over_base_amount_western = str(sales_price - base_price_western)
                     
+                    # 超基础金额（中成药）= 君元销售价 - 医保基础价格_中成药
+                    if base_price_chinese and sales_price and sales_price > base_price_chinese:
+                        over_base_amount_chinese = str(sales_price - base_price_chinese)
+                    
+                    # 超上限金额 = 君元销售价 - 医保价格上限
                     if limit_price and sales_price and sales_price > limit_price:
                         over_limit_amount = str(sales_price - limit_price)
                     
@@ -272,14 +282,16 @@ class MedicalPriceCompareService:
                         row.get('君元规格', ''),
                         row.get('君元生产厂家', ''),
                         row.get('君元库存数量', ''),
-                        str(base_price) if base_price else "",
+                        row.get('三同药品参比价', ''),
+                        str(base_price_western) if base_price_western else "",
                         row.get('医保基础价格_中成药', ''),
                         str(limit_price) if limit_price else "",
                         str(sales_price) if sales_price else "",
                         row.get('包装价', ''),
                         row.get('单片价', ''),
                         abnormal_level,
-                        over_base_amount,
+                        over_base_amount_western,
+                        over_base_amount_chinese,
                         over_limit_amount,
                         "未处理",
                         json.dumps(link_detail, ensure_ascii=False),
@@ -318,10 +330,10 @@ class MedicalPriceCompareService:
                     INSERT INTO medical_price_compare_result (
                         compare_batch_id, 医保编码, 西药医保编码, 中成药医保编码, 三同医保编码, 国家药品代码, 商品编码, 旧商品编码,
                         商品名称, 规格, 生产厂家, 君元商品编码, 君元商品名称,
-                        君元规格, 君元生产厂家, 君元库存数量, 医保基础价格, 医保基础价格_中成药,
+                        君元规格, 君元生产厂家, 君元库存数量, 三同药品参比价, 医保基础价格, 医保基础价格_中成药,
                         医保价格上限, 君元销售价, 君元包装价, 君元单片价, 异常等级,
-                        超基础金额, 超上限金额, 处理状态, 关联详情, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        超基础金额, 超基础金额_中成药, 超上限金额, 处理状态, 关联详情, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ''', batch_insert_data)
             
             # 4. 保存比对批次记录
@@ -390,12 +402,13 @@ class MedicalPriceCompareService:
         if limit_price == Decimal('0') and base_price_western == Decimal('0') and base_price_chinese == Decimal('0'):
             return "正常"
         
-        # 价格比对（所有null价格默认为0）
-        if sales_price > limit_price:
+        # 价格比对
+        # 当医保价格上限为0时，不参与比对（不判断严重异常）
+        if limit_price != Decimal('0') and sales_price > limit_price:
             return "严重异常"
-        elif sales_price > base_price_western:
+        elif base_price_western != Decimal('0') and sales_price > base_price_western:
             return "异常"
-        elif sales_price > base_price_chinese:
+        elif base_price_chinese != Decimal('0') and sales_price > base_price_chinese:
             return "异常"
         else:
             return "正常"

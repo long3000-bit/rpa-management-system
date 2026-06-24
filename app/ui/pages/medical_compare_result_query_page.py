@@ -81,14 +81,14 @@ class MedicalCompareResultQueryPage(QWidget):
         
         # 结果表格
         self.result_table = QTableWidget()
-        self.result_table.setColumnCount(23)  # 添加库存数量、超基础金额、超上限金额列
+        self.result_table.setColumnCount(25)  # 添加库存数量、三同药品参比价、超基础金额、超基础金额_中成药、超上限金额列
         self.result_table.setHorizontalHeaderLabels([
             "君元商品编码", "君元商品名称", "君元规格", "君元生产厂家", "君元库存数量",
             "商品编码", "旧商品编码", "商品名称", "规格", "生产厂家", 
             "医保编码", "西药医保编码", "中成药医保编码", "三同医保编码",
             "君元销售价", "君元包装价", "君元单片价", 
-            "医保价格上限", "医保基础价格", "医保基础价格_中成药",
-            "超基础金额", "超上限金额", "异常等级"
+            "三同药品参比价", "医保价格上限", "医保基础价格", "医保基础价格_中成药",
+            "超基础金额", "超基础金额_中成药", "超上限金额", "异常等级"
         ])
         
         # 设置选择模式：整行选择
@@ -107,7 +107,7 @@ class MedicalCompareResultQueryPage(QWidget):
         header.setSectionResizeMode(QHeaderView.Interactive)  # 允许用户调整列宽
         
         # 设置每列的默认宽度
-        column_widths = [120, 200, 100, 150, 100, 120, 120, 200, 100, 150, 120, 120, 120, 120, 100, 100, 100, 120, 120, 150, 100, 100, 100]
+        column_widths = [120, 200, 100, 150, 100, 120, 120, 200, 100, 150, 120, 120, 120, 120, 100, 100, 100, 120, 120, 120, 150, 100, 100, 100, 100]
         for i, width in enumerate(column_widths):
             self.result_table.setColumnWidth(i, width)
         
@@ -199,12 +199,14 @@ class MedicalCompareResultQueryPage(QWidget):
                 self.result_table.setItem(row_idx, 14, QTableWidgetItem(result.get('君元销售价', '')))
                 self.result_table.setItem(row_idx, 15, QTableWidgetItem(result.get('君元包装价', '')))
                 self.result_table.setItem(row_idx, 16, QTableWidgetItem(result.get('君元单片价', '')))
-                self.result_table.setItem(row_idx, 17, QTableWidgetItem(result.get('医保价格上限', '')))
-                self.result_table.setItem(row_idx, 18, QTableWidgetItem(result.get('医保基础价格', '')))
-                self.result_table.setItem(row_idx, 19, QTableWidgetItem(result.get('医保基础价格_中成药', '')))
-                self.result_table.setItem(row_idx, 20, QTableWidgetItem(result.get('超基础金额', '')))
-                self.result_table.setItem(row_idx, 21, QTableWidgetItem(result.get('超上限金额', '')))
-                self.result_table.setItem(row_idx, 22, QTableWidgetItem(result.get('异常等级', '')))
+                self.result_table.setItem(row_idx, 17, QTableWidgetItem(result.get('三同药品参比价', '')))
+                self.result_table.setItem(row_idx, 18, QTableWidgetItem(result.get('医保价格上限', '')))
+                self.result_table.setItem(row_idx, 19, QTableWidgetItem(result.get('医保基础价格', '')))
+                self.result_table.setItem(row_idx, 20, QTableWidgetItem(result.get('医保基础价格_中成药', '')))
+                self.result_table.setItem(row_idx, 21, QTableWidgetItem(result.get('超基础金额', '')))
+                self.result_table.setItem(row_idx, 22, QTableWidgetItem(result.get('超基础金额_中成药', '')))
+                self.result_table.setItem(row_idx, 23, QTableWidgetItem(result.get('超上限金额', '')))
+                self.result_table.setItem(row_idx, 24, QTableWidgetItem(result.get('异常等级', '')))
             
         except Exception as e:
             logging.error(f"加载比对结果失败: {e}")
